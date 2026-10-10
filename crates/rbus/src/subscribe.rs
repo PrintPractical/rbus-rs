@@ -124,6 +124,13 @@ pub struct RowId {
     pub alias: Option<String>,
 }
 
+impl From<u32> for RowId {
+    /// A row without an alias.
+    fn from(inst: u32) -> Self {
+        RowId { inst, alias: None }
+    }
+}
+
 /// A row added to or removed from a table (E4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowEvent {

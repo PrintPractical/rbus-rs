@@ -5,8 +5,9 @@
 //!   never blocks a caller and frames leave in the order they were queued.
 //! - **Reads** happen in the reader task. It matches each response to its
 //!   pending request by sequence number (wire-protocol.md section 3), routes
-//!   each event to its subscription by the echoed component id, and fans out
-//!   broker advisories.
+//!   each event to its subscription by the echoed component id, fans out
+//!   broker advisories, and hands each request for our providers to a task
+//!   of its own (`provider::serve`).
 //! - **Cancellation**: a pending request is removed from the table when its
 //!   [`Pending`] is dropped, so a cancelled or timed-out call leaves nothing
 //!   behind and a late response is discarded.
@@ -88,6 +89,10 @@ pub(crate) struct Core {
     advisory_listeners: Mutex<Vec<Weak<Queue<Advisory>>>>,
     advisories_registered: AtomicBool,
     resubscribe: Arc<Notify>,
+    /// The providers served on this connection.
+    pub(crate) registry: crate::provider::Registry,
+    /// The component's route id; element aliases are registered under it.
+    pub(crate) component_route: u32,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -136,7 +141,8 @@ impl Core {
         }
     }
 
-    fn queue(&self, frame: &Frame) -> Result<()> {
+    /// Queues a frame for the writer task.
+    pub(crate) fn queue(&self, frame: &Frame) -> Result<()> {
         let bytes = frame.encode()?;
         self.tx
             .send(Outgoing::Frame(bytes))
@@ -144,7 +150,7 @@ impl Core {
     }
 
     /// Sends a JSON control message with no flags (no reply expected).
-    fn send_control<T: serde::Serialize>(&self, msg: &T) -> Result<()> {
+    pub(crate) fn send_control<T: serde::Serialize>(&self, msg: &T) -> Result<()> {
         let header = Header::new(self.next_seq(), Flags::NONE, control::TOPIC_SUBSCRIBE, "");
         self.queue(&Frame::new(header, control::encode(msg)))
     }
@@ -247,7 +253,7 @@ impl Core {
         lock(&self.subs).len()
     }
 
-    async fn dispatch(&self, frame: Frame) {
+    async fn dispatch(self: &Arc<Self>, frame: Frame) {
         let flags = frame.header.flags;
         if flags.contains(Flags::RESPONSE) {
             let seq = frame.header.seq;
@@ -260,8 +266,9 @@ impl Core {
             self.on_advisory(&frame).await;
         } else if flags.contains(Flags::RAW_BINARY) && !flags.contains(Flags::REQUEST) {
             self.on_event(&frame).await;
+        } else if flags.contains(Flags::RAW_BINARY) {
+            tokio::spawn(crate::provider::serve(self.clone(), frame));
         } else {
-            // Requests for this component arrive with the provider engine (M4).
             trace!(topic = %frame.header.topic, ?flags, "unhandled inbound message");
         }
     }
@@ -312,7 +319,6 @@ impl Core {
 pub(crate) struct Conn {
     core: Arc<Core>,
     component: String,
-    component_route: u32,
     reader: JoinHandle<()>,
     resubscriber: JoinHandle<()>,
 }
@@ -392,6 +398,8 @@ impl Conn {
             advisory_listeners: Mutex::new(Vec::new()),
             advisories_registered: AtomicBool::new(false),
             resubscribe: resubscribe.clone(),
+            registry: crate::provider::Registry::default(),
+            component_route: NEXT_COMPONENT_ROUTE.fetch_add(1, Ordering::Relaxed),
         });
         tokio::spawn(writer(write, rx, Arc::downgrade(&core)));
         let reader = tokio::spawn(reader(read, core.clone()));
@@ -399,7 +407,6 @@ impl Conn {
         let conn = Conn {
             core,
             component: component.to_owned(),
-            component_route: NEXT_COMPONENT_ROUTE.fetch_add(1, Ordering::Relaxed),
             reader,
             resubscriber,
         };

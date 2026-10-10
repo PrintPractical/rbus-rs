@@ -26,6 +26,8 @@
 //! - Scalars convert through [`RbusType`]; structured data through serde
 //!   ([`to_object`], [`from_object`]).
 //! - Every failure is an [`Error`].
+//! - To serve a data model, implement [`provider::Provider`] and register it
+//!   with [`Rbus::provide`].
 //!
 //! Each operation runs inside a `tracing` span (`rbus.get`, `rbus.set`, ...).
 #![forbid(unsafe_code)]
@@ -37,6 +39,7 @@ mod convert;
 mod discover;
 mod error;
 pub mod name;
+pub mod provider;
 mod queue;
 mod subscribe;
 mod table;
