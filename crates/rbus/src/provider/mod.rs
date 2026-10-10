@@ -1,6 +1,39 @@
 //! Serving a data model to the bus.
 //!
-//! Implement [`Provider`] and hand it to [`Rbus::provide`](crate::Rbus::provide).
+//! There are three ways to write a provider, and all of them are a
+//! [`Provider`] in the end (decisions.md D3):
+//!
+//! - `#[derive(rbus::Model)]` on a struct of [`Prop`]s, [`Table`]s and
+//!   [`Event`]s: rbus serves the stored state and publishes its changes.
+//! - `#[rbus::provider(path = "..")]` on an impl block, for values computed
+//!   on demand and for methods.
+//! - [`DataModel`], a builder of closures for trees known only at run time.
+//!
+//! ```no_run
+//! use rbus::provider::{Prop, Table};
+//!
+//! #[derive(rbus::Model, Default)]
+//! #[rbus(path = "Device.Hosts.")]
+//! struct Hosts {
+//!     #[rbus(writable)]
+//!     enable: Prop<bool>,                 // Device.Hosts.Enable
+//!     #[rbus(name = "Host")]
+//!     hosts: Table<Host>,                 // Device.Hosts.Host.{i}.
+//! }
+//!
+//! #[derive(rbus::Row, Clone, PartialEq, Default)]
+//! struct Host {
+//!     name: String,                       // Device.Hosts.Host.{i}.Name
+//! }
+//!
+//! # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
+//! let hosts = bus.provide(Hosts::default()).await?;
+//! hosts.enable.set(true);                 // published to subscribers
+//! hosts.hosts.insert(Host { name: "printer".into() })?;
+//! # Ok(()) }
+//! ```
+//!
+//! Or implement [`Provider`] by hand and hand it to [`Rbus::provide`](crate::Rbus::provide).
 //! The engine registers the [`Schema`]'s names with the broker and answers
 //! every request for them: gets, sets (as one [`Transaction`]), method calls,
 //! table rows and element listings. It also does what C leaves to provider
@@ -43,25 +76,35 @@
 //! ```
 
 mod context;
+mod data_model;
+mod derive;
 mod engine;
 mod events;
 mod fault;
+mod handle;
 mod model;
 mod provided;
 mod schema;
+mod state;
 
 use std::future::Future;
 
 use rbus_wire::value::{Object, Value};
 
 pub use context::{Change, Context, Transaction};
+pub use data_model::DataModel;
+pub use derive::{BoxFuture, Model, Row, relative, value_as};
 pub use events::{NoStore, SubscriberInfo, SubscriberStore, SubscriptionEvent, SubscriptionEvents};
 pub use fault::{Fault, SetFault};
+pub use handle::Handle;
 pub use provided::{Provide, Provided};
+#[cfg(feature = "macros")]
+pub use rbus_macros::{Model, Row};
 pub use rbus_wire::event::{Filter, RelationOp};
 pub use schema::{Access, Element, ElementKind, Rows, Schema};
+pub use state::{Event, Prop, Table};
 
-pub(crate) use engine::{Outbox, Registry, serve};
+pub(crate) use engine::{Registry, serve};
 
 use crate::name::{MethodName, PropertyName, TablePath};
 use crate::subscribe::RowId;
@@ -152,5 +195,14 @@ pub trait Provider: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), Fault>> + Send {
         let _ = (cx, subscriber);
         async { Ok(()) }
+    }
+
+    /// Called once, when the provider is registered and before the broker
+    /// routes any request to it, with the handle it publishes events and
+    /// adds rows through. Keep a clone to publish from handlers or other
+    /// tasks. Does nothing by default; `#[derive(Model)]` uses it to connect
+    /// its [`Prop`]s, [`Table`]s and [`Event`]s.
+    fn attach(&self, handle: Handle) {
+        let _ = handle;
     }
 }

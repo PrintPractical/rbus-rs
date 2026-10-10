@@ -1,0 +1,59 @@
+error: the path must end in '.', like "Device.WiFi."
+ --> tests/ui/model.rs:9:15
+  |
+9 | #[rbus(path = "Device.A")]
+  |               ^^^^^^^^^^
+
+error: a model's path can't contain `{i}`; put the model's rows in a `Table` instead
+  --> tests/ui/model.rs:15:15
+   |
+15 | #[rbus(path = "Device.A.{i}.")]
+   |               ^^^^^^^^^^^^^^^
+
+error: unknown rbus field option; expected one of: name, writable, validate, add_row, remove_row, object, skip
+  --> tests/ui/model.rs:22:12
+   |
+22 |     #[rbus(writeable)]
+   |            ^^^^^^^^^
+
+error: `writable` doesn't apply to a table
+  --> tests/ui/model.rs:28:12
+   |
+28 |     #[rbus(writable)]
+   |            ^^^^^^^^
+
+error: `validate` checks consumers' sets; add `writable` too
+  --> tests/ui/model.rs:34:23
+   |
+34 |     #[rbus(validate = check)]
+   |                       ^^^^^
+
+error: `add_row` doesn't apply to an event
+  --> tests/ui/model.rs:40:12
+   |
+40 |     #[rbus(add_row)]
+   |            ^^^^^^^
+
+error: a member name is one path segment: no '.', '*', '[', ']', '{', '}' or "()"
+  --> tests/ui/model.rs:46:19
+   |
+46 |     #[rbus(name = "A.B")]
+   |                   ^^^^^
+
+error: two members are named `Enable`
+  --> tests/ui/model.rs:54:5
+   |
+54 |     enable: Prop<bool>,
+   |     ^^^^^^
+
+error: `on_commit` needs `path`: only a model with a path is a provider
+  --> tests/ui/model.rs:58:20
+   |
+58 | #[rbus(on_commit = Hooks::commit)]
+   |                    ^^^^^
+
+error: rbus derives work on structs with named fields
+  --> tests/ui/model.rs:64:13
+   |
+64 | struct Tuple(Prop<bool>);
+   |             ^^^^^^^^^^^^

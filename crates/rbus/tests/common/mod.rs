@@ -175,3 +175,32 @@ pub fn rbuscli_events(out: &str) -> Vec<String> {
     events.extend(current.map(|ev| ev.join("\n")));
     events
 }
+
+/// Serializes the tests that serve the same fixed tree (a derive's `path`).
+/// Take a turn first; when done, [`Turn::release`] drops the provider and
+/// waits until the broker no longer lists its component as the owner of
+/// `element`, so the next test can register the same names.
+pub struct Turn {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Turn {
+    pub async fn take(lock: &'static tokio::sync::Mutex<()>) -> Turn {
+        Turn {
+            _guard: lock.lock().await,
+        }
+    }
+
+    pub async fn release<P>(self, provided: rbus::provider::Provided<P>, element: &str) {
+        let component = provided.bus().component().to_owned();
+        drop(provided);
+        let element = element.to_owned();
+        tokio::task::spawn_blocking(move || {
+            raw_client()
+                .wait_for_no_owner(&element, &component, Duration::from_secs(5))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+    }
+}

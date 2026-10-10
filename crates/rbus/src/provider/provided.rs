@@ -11,11 +11,12 @@ use tracing::{Instrument, debug, debug_span};
 
 use crate::bus::Rbus;
 use crate::error::{Error, Result, Status};
-use crate::name::{IntoName, Name, TablePath};
+use crate::name::{IntoName, TablePath};
+use crate::provider::Provider;
 use crate::provider::engine::DynProvider;
 use crate::provider::events::{NoStore, SubscriberInfo, SubscriberStore, SubscriptionEvents};
+use crate::provider::handle::{Handle, element_error};
 use crate::provider::model::{MountId, SchemaError};
-use crate::provider::{Outbox, Provider};
 use crate::subscribe::RowId;
 use crate::types::IntoValue;
 
@@ -86,10 +87,7 @@ fn schema_error(e: SchemaError) -> Error {
 }
 
 fn status(name: &str, status: Status) -> Error {
-    match Name::parse(name.to_owned()) {
-        Ok(name) => Error::Status { name, status },
-        Err(e) => Error::Name(e),
-    }
+    element_error(name, status)
 }
 
 impl<P: Provider> IntoFuture for Provide<P> {
@@ -105,6 +103,7 @@ impl<P: Provider> IntoFuture for Provide<P> {
                 store,
             } = self;
             let schema = provider.schema();
+            let serial = schema.is_serialized();
             let span = debug_span!("rbus.provide", elements = schema.elements().len());
             async move {
                 let provider = Arc::new(provider);
@@ -117,14 +116,19 @@ impl<P: Provider> IntoFuture for Provide<P> {
                 let dyn_provider: Arc<dyn DynProvider> = provider.clone();
                 let id = conn
                     .registry
-                    .mount_with(schema, dyn_provider, serialized, store)
+                    .mount_with(schema, dyn_provider, serialized || serial, store)
                     .map_err(schema_error)?;
+                let handle = Handle::new(conn, id);
                 let provided = Provided {
                     provider,
                     bus: bus.clone(),
                     id,
+                    handle: handle.clone(),
                     names: Vec::with_capacity(names.len()),
                 };
+                // Before the broker routes anything here, so models can
+                // record the rows they start with.
+                provided.provider.attach(handle);
                 let provided = provided.register(names).await?;
                 conn.registry.restore(id, &***conn);
                 Ok(provided)
@@ -144,6 +148,7 @@ pub struct Provided<P> {
     provider: Arc<P>,
     bus: Rbus,
     id: MountId,
+    handle: Handle,
     /// The aliases registered with the broker.
     names: Vec<String>,
 }
@@ -193,53 +198,10 @@ impl<P> Provided<P> {
         }
     }
 
-    /// Adds a row the provider owns to one of its tables (PT3). `table` is
-    /// the table's path with instance numbers for any outer rows:
-    /// `Device.WiFi.Radio.` or `Device.Bridge.2.Port.`.
-    ///
-    /// Fails with [`Status::ElementDoesNotExist`] if the table (or an outer
-    /// row) doesn't exist, [`Status::AccessNotAllowed`] if another provider
-    /// owns it, and [`Status::ElementNameDuplicate`] if the instance number
-    /// or alias is taken.
-    pub fn add_row(&self, table: impl IntoName<TablePath>, row: impl Into<RowId>) -> Result<()> {
-        let table = table.into_name()?;
-        self.bus
-            .inner
-            .conn
-            .registry
-            .add_local_row(self.id, &table, row.into(), self.outbox())
-            .map_err(|status| Error::Status {
-                name: table.into(),
-                status,
-            })
-    }
-
-    /// Removes a row, and every row of the tables inside it.
-    pub fn remove_row(&self, table: impl IntoName<TablePath>, inst: u32) -> Result<()> {
-        let table = table.into_name()?;
-        self.bus
-            .inner
-            .conn
-            .registry
-            .remove_local_row(self.id, &table, inst, self.outbox())
-            .map_err(|status| Error::Status {
-                name: table.into(),
-                status,
-            })
-    }
-
-    /// The rows of a table, in the order they were added.
-    pub fn rows(&self, table: impl IntoName<TablePath>) -> Result<Vec<RowId>> {
-        let table = table.into_name()?;
-        self.bus
-            .inner
-            .conn
-            .registry
-            .rows(&table)
-            .map_err(|status| Error::Status {
-                name: table.into(),
-                status,
-            })
+    /// The handle the provider got in [`Provider::attach`]: publishing and
+    /// rows, without holding on to the `Provided`.
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
     }
 
     /// The connection this provider is registered on.
@@ -247,18 +209,24 @@ impl<P> Provided<P> {
         &self.bus
     }
 
-    fn outbox(&self) -> &dyn Outbox {
-        &**self.bus.inner.conn
+    /// Adds a row the provider owns to one of its tables; see
+    /// [`Handle::add_row`].
+    pub fn add_row(&self, table: impl IntoName<TablePath>, row: impl Into<RowId>) -> Result<()> {
+        self.handle.add_row(table, row)
     }
 
-    fn element_error(name: &str, status: Status) -> Error {
-        self::status(name, status)
+    /// Removes a row; see [`Handle::remove_row`].
+    pub fn remove_row(&self, table: impl IntoName<TablePath>, inst: u32) -> Result<()> {
+        self.handle.remove_row(table, inst)
     }
 
-    /// Publishes a general event to its subscribers (P4). `data` is any
-    /// serializable value that converts to an object, such as a struct or
-    /// an [`Object`](crate::Object). With no subscribers it does nothing
-    /// (D10).
+    /// The rows of a table, in the order they were added.
+    pub fn rows(&self, table: impl IntoName<TablePath>) -> Result<Vec<RowId>> {
+        self.handle.rows(table)
+    }
+
+    /// Publishes a general event to its subscribers (P4); see
+    /// [`Handle::publish`].
     ///
     /// ```no_run
     /// # fn demo(provided: rbus::provider::Provided<impl rbus::provider::Provider>) -> rbus::Result<()> {
@@ -267,68 +235,37 @@ impl<P> Provided<P> {
     /// provided.publish("Device.WiFi.Alarm!", &Alarm { level: 3 })?;
     /// # Ok(()) }
     /// ```
-    ///
-    /// Fails with [`Status::ElementDoesNotExist`] unless `event` is an event
-    /// of this provider's schema (rows included), and with
-    /// [`Error::Type`] if `data` isn't an object.
     pub fn publish<T: serde::Serialize + ?Sized>(&self, event: &str, data: &T) -> Result<()> {
-        let data = crate::convert::to_object(data)?;
-        self.bus
-            .inner
-            .conn
-            .registry
-            .publish_event(self.id, self.outbox(), event, data)
-            .map_err(|s| Self::element_error(event, s))
+        self.handle.publish(event, data)
     }
 
     /// Publishes a change of a property's value that the provider made
-    /// itself (P9): subscribers get `{value, oldValue, by}`, with `by` our
-    /// component, and filters apply. Nothing is sent if the values are
-    /// equal or nobody is subscribed.
+    /// itself (P9); see [`Handle::publish_value_change`].
     pub fn publish_value_change(
         &self,
         property: &str,
         old: impl IntoValue,
         new: impl IntoValue,
     ) -> Result<()> {
-        self.bus
-            .inner
-            .conn
-            .registry
-            .publish_change(
-                self.id,
-                self.outbox(),
-                property,
-                old.into_value(),
-                new.into_value(),
-            )
-            .map_err(|s| Self::element_error(property, s))
+        self.handle.publish_value_change(property, old, new)
     }
 
-    /// Reads a property through [`Provider::get`] and, if its value differs
-    /// from the last one its subscribers saw, publishes the change. Use it
-    /// when the provider knows a value changed but not the old value.
+    /// Reads a property again and publishes the change, if any; see
+    /// [`Handle::notify_changed`].
     pub async fn notify_changed(&self, property: &str) -> Result<()> {
-        self.bus
-            .inner
-            .conn
-            .registry
-            .notify_changed(self.id, self.outbox(), property)
-            .await
-            .map_err(|s| Self::element_error(property, s))
+        self.handle.notify_changed(property).await
     }
 
-    /// The current subscribers to this provider's elements (P8). With a
-    /// name, only the subscriptions that cover it: an exact subscription,
-    /// or a pattern (`*`, `[alias]`) that matches it now.
+    /// The current subscribers to this provider's elements (P8); see
+    /// [`Handle::subscribers`].
     pub fn subscribers(&self, name: Option<&str>) -> Vec<SubscriberInfo> {
-        self.bus.inner.conn.registry.subscribers(self.id, name)
+        self.handle.subscribers(name)
     }
 
     /// A stream of consumers subscribing and unsubscribing (P8). It ends
     /// when this `Provided` is dropped.
     pub fn subscription_events(&self) -> SubscriptionEvents {
-        self.bus.inner.conn.registry.listen(self.id)
+        self.handle.subscription_events()
     }
 }
 

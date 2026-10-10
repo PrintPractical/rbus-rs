@@ -722,6 +722,13 @@ impl Registry {
             Err(s) => return fail(s),
         };
         let cx = cx.with_instances(r.instances);
+        let before: Vec<u32> = self
+            .state()
+            .model
+            .rows(&r.canonical)
+            .iter()
+            .map(|row| row.inst)
+            .collect();
         let inst = {
             let _guard = handler.lock().await;
             match handler
@@ -741,6 +748,21 @@ impl Registry {
             alias: req.alias,
         };
         let mut state = self.state();
+        // A provider may record the new row itself, with `Handle::add_row`,
+        // as `Table` does so that the rows inside it can be recorded too.
+        // The row and its event are already there.
+        if !before.contains(&inst)
+            && state
+                .model
+                .rows(&r.canonical)
+                .iter()
+                .any(|x| x.inst == inst)
+        {
+            return AddRowResponse {
+                status: 0,
+                instance: Some(inst),
+            };
+        }
         match state.model.add_row(&r.canonical, row.clone()) {
             Ok(()) => {
                 state.row_event(out, &r.canonical, &row, true);

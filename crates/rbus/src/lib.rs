@@ -26,11 +26,15 @@
 //! - Scalars convert through [`RbusType`]; structured data through serde
 //!   ([`to_object`], [`from_object`]).
 //! - Every failure is an [`Error`].
-//! - To serve a data model, implement [`provider::Provider`] and register it
-//!   with [`Rbus::provide`].
+//! - To serve a data model, derive [`Model`] (or write a
+//!   [`provider::Provider`] another way) and register it with
+//!   [`Rbus::provide`].
 //!
 //! Each operation runs inside a `tracing` span (`rbus.get`, `rbus.set`, ...).
 #![forbid(unsafe_code)]
+
+// The macros name `::rbus::...`, which this makes work inside the crate too.
+extern crate self as rbus;
 
 mod bus;
 mod conn;
@@ -64,6 +68,11 @@ pub use subscribe::{
 pub use table::{AddRow, RowRef, Table};
 pub use tree::{Tree, TreeFailure};
 pub use types::{IntoValue, RbusType};
+
+/// Typed names checked while compiling; derives and the impl-block
+/// attribute for providers (design.md 4.5, 4.8, 4.9).
+#[cfg(feature = "macros")]
+pub use rbus_macros::{Model, Row, name, provider};
 
 /// The wire codecs this crate is built on.
 pub use rbus_wire as wire;

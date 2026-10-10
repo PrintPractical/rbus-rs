@@ -1,8 +1,19 @@
 # Conformance provider
 
-`mod.rs` is a hand-written `rbus::provider::Provider` that serves the
-`Device.TestProvider.*` data model of rbus's own C test provider,
-`third_party/rbus/test/rbus/provider/rbusTestProvider.c`. `test_consumer.rs`
+`mod.rs` serves the `Device.TestProvider.*` data model of rbus's own C test
+provider, `third_party/rbus/test/rbus/provider/rbusTestProvider.c`, written
+with the macros (M6). It is five providers on one connection:
+
+- `Conformance` (`#[derive(Model)]`) holds the stored values (`Value.*`,
+  `BigString`, `BigBytes`, `TestRunning`), every table and every event;
+- `Computed` (`#[rbus::provider]`) serves the values that change on every
+  read (`VCParam*`), `VCParamBy`, `NoAutoPubInt`, the write-only switches
+  and the top-level methods;
+- `Table1Methods`, `Table2Methods` and `EventsTableProps` serve the methods
+  and the read counter inside table rows.
+
+Until M6 it was a hand-written `Provider` (see git history); the groups
+passed with the same counts both ways. `test_consumer.rs`
 runs the C `rbusTestConsumer` against it, one group at a time. Each group must
 pass exactly as many checks as it passes against the C provider, with no
 failures. That shows C consumers can't tell the Rust provider from the C one.
@@ -30,10 +41,16 @@ The check counts were taken from `rbusTestProvider` at the pinned rbus commit
 
 None of these is visible to the groups above:
 
-- **`PartialPath2` rows.** The C provider hides these rows behind a
-  table-level get handler, which is PT7 (planned for later). Here they are
-  ordinary provider-owned rows, with the same instance numbers and values.
-  Partial-path, wildcard and single gets return the same results.
+- **`PartialPath` rows.** Each parameter holds its own name, as in C, but
+  stored in the row when the provider adds it, not computed by a getter;
+  rows that consumers add start empty. The C provider also hides the
+  `PartialPath2` rows behind a table-level get handler, which is PT7
+  (planned for later). Here they are ordinary provider-owned rows, with the
+  same instance numbers and values. Partial-path, wildcard and single gets
+  return the same results.
+- **Element order.** The five providers register in turn, so a listing of
+  `Device.TestProvider.` shows the stored elements before the computed
+  ones, where C interleaves them. Within each table the order is C's.
 - **`MethodAsync2()` and `MethodAsync3()`.** The C provider answers these
   from a thread, 3 s later (`rbusMethod_SendAsyncResponse`). Here the async
   handler waits 3 s and then returns, which is P6 done the Rust way.
@@ -48,18 +65,18 @@ None of these is visible to the groups above:
   shows.
 - **Polling.** C polls every subscribed property every 2 s. Here only the
   properties whose values change without a set (`VCParam*`, `VCParamBy`,
-  `EventsTable.{i}.Prop`) are declared with `Schema::poll(2 s)`. Changes made
+  `EventsTable.{i}.Prop`) are declared with `#[rbus(get, poll = "2s")]`. Changes made
   by a consumer's set are published at once, so the `by` checks see them
   sooner than with C.
 - **The main loop.** `rbusTestProvider`'s `main` publishes `Event1!`,
   `Event2!`, `EventsTable.{i}.Event` and `NoAutoPubInt` every second while
   they have subscribers, adds the `TableReg` rows once they are subscribed
   to, and registers `ProviderNotFoundEvent1!` 20 s after
-  `TestProviderNotFound` is set. `main_loop` does the same, asking
-  `Provided::subscribers` where C counts in its subscribe handlers; the late
-  event is a second provider on the same connection.
-- **`ErrorSubHandlerEvent!`** is refused in `Provider::on_subscribe`, where C
-  refuses it in its subscribe handler.
+  `TestProviderNotFound` is set. `main_loop` does the same, asking each
+  `Event` and `Table` for its subscribers where C counts in its subscribe
+  handlers; the late event is another provider on the same connection.
+- **`ErrorSubHandlerEvent!`** is refused by the model's `on_subscribe`
+  hook, where C refuses it in its subscribe handler.
 - **`ResetTables`** is accepted and does nothing. The C provider resets its
   own copy of the rows, but the library's rows (which consumers see) stay;
   each group here runs against a fresh provider anyway.

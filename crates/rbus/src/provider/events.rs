@@ -49,6 +49,13 @@ pub struct SubscriptionEvents {
 }
 
 impl SubscriptionEvents {
+    /// A stream that has already ended.
+    pub(crate) fn ended() -> Self {
+        let queue = Arc::new(Queue::new(1, crate::queue::Overflow::DropOldest));
+        queue.close();
+        SubscriptionEvents { queue }
+    }
+
     /// The next change; `None` once the provider is gone.
     pub async fn next(&mut self) -> Option<Result<SubscriptionEvent, EventError>> {
         poll_fn(|cx| self.poll_item(cx)).await
@@ -133,6 +140,7 @@ mod tests {
         );
         queue.close();
         assert!(events.next().await.is_none());
+        assert!(SubscriptionEvents::ended().next().await.is_none());
         assert!(format!("{events:?}").contains("SubscriptionEvents"));
         NoStore.save(&[info]);
         assert!(NoStore.load().is_empty());

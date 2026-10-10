@@ -1,7 +1,8 @@
-//! The design.md section 4 examples implemented so far (M2, M3), run against
-//! real providers. Element names are swapped for ones the C peers serve. The
-//! `name!` macro (M6) and `.reconnect(..)` (M7) arrive with their milestones.
-//! Run with `scripts/interop.sh`.
+//! The design.md section 4 examples, run against real providers and
+//! consumers. Consumer examples swap element names for ones the C peers
+//! serve; provider examples keep their names and are checked from `rbuscli`
+//! and Rust consumers. `.reconnect(..)` arrives with M7. Run with
+//! `scripts/interop.sh`.
 
 mod common;
 
@@ -52,8 +53,18 @@ struct RebootArgs {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_5_names_and_values() -> rbus::Result<()> {
-    const UPTIME: PropertyName = PropertyName::from_static("Device.TestProvider.Value.UINT32");
-    const METHOD: MethodName = MethodName::from_static("Device.TestProvider.Method11()");
+    use rbus::{EventName, TablePath, name};
+
+    const UPTIME: PropertyName = name!("Device.TestProvider.Value.UINT32");
+    const METHOD: MethodName = name!("Device.TestProvider.Method11()");
+    const ALARM: EventName = name!("Device.TestProvider.Event1!");
+    const ROWS: TablePath = name!("Device.TestProvider.Table1.");
+    assert_eq!(
+        (ALARM.as_str(), ROWS.as_str()),
+        ("Device.TestProvider.Event1!", "Device.TestProvider.Table1.")
+    );
+    // `bus.invoke(UPTIME, ())` doesn't compile: the `compile_fail` doctest
+    // in src/name.rs.
 
     let _p = test_provider();
     let bus = Rbus::connect("com.example.names").await?;
@@ -237,5 +248,417 @@ async fn design_4_7_subscriptions() -> rbus::Result<()> {
     assert!(tick.index >= 0);
 
     ticks.unsubscribe().await?; // or just drop it
+    Ok(())
+}
+
+/// The 4.8 and 4.9 examples both serve `Device.WiFi.`, so they take turns.
+static WIFI: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The 4.8 model, as design.md writes it.
+mod wifi {
+    use rbus::provider::{Context, Event, Fault, Prop, Table};
+    use serde::Serialize;
+
+    #[derive(Serialize, Clone, Debug, PartialEq)]
+    pub struct Alarm {
+        pub level: u8,
+        pub text: String,
+    }
+
+    #[derive(rbus::Model, Default)]
+    #[rbus(path = "Device.WiFi.")]
+    pub struct Wifi {
+        pub radio_number_of_entries: Prop<u32>, // Device.WiFi.RadioNumberOfEntries (read-only)
+        #[rbus(writable)]
+        pub enable: Prop<bool>, // Device.WiFi.Enable
+        #[rbus(name = "Radio", add_row = Wifi::new_radio, remove_row)]
+        pub radios: Table<Radio>, // Device.WiFi.Radio.{i}.  consumers may add and remove rows (PT2)
+        pub alarm: Event<Alarm>,                // Device.WiFi.Alarm!
+    }
+
+    #[derive(rbus::Row, Clone, PartialEq, Default)]
+    pub struct Radio {
+        #[rbus(writable)]
+        pub enable: bool, // Device.WiFi.Radio.{i}.Enable
+        #[rbus(writable, validate = valid_channel)]
+        pub channel: u32,
+        pub status: String,
+    }
+
+    impl Wifi {
+        async fn new_radio(&self, _cx: &Context, _alias: Option<&str>) -> Result<Radio, Fault> {
+            Ok(Radio::default())
+        }
+    }
+
+    fn valid_channel(ch: &u32) -> Result<(), Fault> {
+        matches!(ch, 1..=13 | 36..=165)
+            .then_some(())
+            .ok_or(Fault::invalid_value("channel"))
+    }
+}
+
+#[derive(Deserialize, Debug, PartialEq)]
+struct AlarmData {
+    level: u8,
+    text: String,
+}
+
+/// 4.8 Provider: state-backed models.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn design_4_8_state_backed_model() -> rbus::Result<()> {
+    use common::{rbuscli, rbuscli_values, within};
+    use rbus::RowEvent;
+    use wifi::{Alarm, Radio, Wifi};
+
+    let turn = common::Turn::take(&WIFI).await;
+    let bus = Rbus::connect("com.example.wifi").await?;
+    let wifi = bus.provide(Wifi::default()).await?; // Provided<Wifi>: derefs to &Wifi; dropping it unregisters
+
+    let consumer = Rbus::connect("com.example.wifi-watcher").await?;
+    let mut enable = consumer
+        .subscribe_value::<bool>("Device.WiFi.Enable")
+        .await?;
+    let mut rows = consumer.subscribe_table("Device.WiFi.Radio.").await?;
+    let mut alarms = consumer
+        .subscribe::<AlarmData>("Device.WiFi.Alarm!")
+        .await?;
+
+    // The app changes state through the same handle, and rbus does the
+    // protocol work.
+    wifi.enable.set(true); // VALUE_CHANGED to subscribers if the value changed (P9, P11)
+    let change = within(5, enable.next()).await.unwrap().unwrap();
+    assert_eq!((change.old, change.new), (Some(false), true));
+    assert_eq!(change.by.as_deref(), Some(bus.component()));
+
+    let id = wifi.radios.insert(Radio {
+        channel: 36,
+        ..Default::default()
+    })?; // OBJECT_CREATED (PT3, PT9)
+    assert!(matches!(
+        within(5, rows.next()).await.unwrap().unwrap(),
+        RowEvent::Added { row, .. } if row.inst == id
+    ));
+    let mut status = consumer
+        .subscribe_value::<String>(format!("Device.WiFi.Radio.{id}.Status"))
+        .await?;
+    wifi.radios.update(id, |r| r.status = "Up".into())?; // VALUE_CHANGED for each field that changed
+    let up = within(5, status.next()).await.unwrap().unwrap();
+    assert_eq!((up.old.as_deref(), up.new.as_str()), (Some(""), "Up"));
+
+    // Consumers see the stored state, and their sets are checked.
+    let got = rbuscli(&["get", &format!("Device.WiFi.Radio.{id}.")]).await;
+    let values = rbuscli_values(&got);
+    assert!(
+        values
+            .iter()
+            .any(|(n, v)| n.ends_with(".Channel") && v == "36"),
+        "{got}"
+    );
+    let out = rbuscli(&[
+        "set",
+        &format!("Device.WiFi.Radio.{id}.Channel"),
+        "uint",
+        "14",
+    ])
+    .await;
+    assert!(!out.contains("succeeded"), "{out}");
+    assert_eq!(wifi.radios.get(id).unwrap().channel, 36);
+    consumer
+        .set(format!("Device.WiFi.Radio.{id}.Channel"), 11u32)
+        .await?;
+    assert_eq!(wifi.radios.get(id).unwrap().channel, 11);
+    let out = rbuscli(&["set", "Device.WiFi.RadioNumberOfEntries", "uint", "3"]).await;
+    assert!(!out.contains("succeeded"), "{out}");
+
+    // Rows from either side: a consumer's row goes through `new_radio`.
+    let added = consumer
+        .table("Device.WiFi.Radio.")
+        .add_row()
+        .alias("guest")
+        .await?;
+    assert_eq!(added.inst, id + 1);
+    assert!(wifi.radios.find("guest").is_some());
+    assert!(matches!(
+        within(5, rows.next()).await.unwrap().unwrap(),
+        RowEvent::Added { row, .. } if row == added
+    ));
+
+    wifi.radios.remove(id)?; // OBJECT_DELETED
+    assert!(matches!(
+        within(5, rows.next()).await.unwrap().unwrap(),
+        RowEvent::Removed { row, .. } if row.inst == id
+    ));
+    wifi.alarm.publish(Alarm {
+        level: 3,
+        text: "DFS".into(),
+    })?; // no-op when nobody is subscribed
+    assert_eq!(
+        within(5, alarms.next()).await.unwrap().unwrap(),
+        AlarmData {
+            level: 3,
+            text: "DFS".into()
+        }
+    );
+    turn.release(wifi, "Device.WiFi.Enable").await;
+    Ok(())
+}
+
+/// The 4.9 impl block, as design.md writes it, over a fake radio HAL.
+mod radio_driver {
+    use rbus::provider::{Context, Fault};
+    use serde::{Deserialize, Serialize};
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    #[derive(Default)]
+    pub struct Hal {
+        power: AtomicI32,
+    }
+
+    impl Hal {
+        pub async fn noise(&self, radio: u32) -> Result<i32, std::io::Error> {
+            if radio > 8 {
+                return Err(std::io::Error::other("no such radio"));
+            }
+            Ok(-90 - radio as i32)
+        }
+    }
+
+    #[derive(Deserialize)]
+    pub struct ResetArgs {
+        pub delay: u32,
+    }
+
+    #[derive(Serialize)]
+    pub struct ResetReply {
+        pub radio: u32,
+        pub after: u32,
+    }
+
+    pub struct RadioDriver {
+        hal: Hal,
+    }
+
+    impl RadioDriver {
+        pub fn new(hal: Hal) -> Self {
+            RadioDriver { hal }
+        }
+    }
+
+    #[rbus::provider(path = "Device.WiFi.Radio.{i}.")]
+    impl RadioDriver {
+        #[rbus(get)] // Device.WiFi.Radio.{i}.Noise
+        async fn noise(&self, cx: &Context) -> Result<i32, Fault> {
+            let [radio] = cx.instances()?; // the {i} values; the count is checked
+            self.hal.noise(radio).await.map_err(Fault::internal)
+        }
+
+        #[rbus(get)]
+        async fn transmit_power(&self, _cx: &Context) -> Result<i32, Fault> {
+            Ok(self.hal.power.load(Ordering::Relaxed))
+        }
+        #[rbus(set = "TransmitPower")]
+        async fn set_transmit_power(&self, _cx: &Context, dbm: i32) -> Result<(), Fault> {
+            if !(0..=30).contains(&dbm) {
+                return Err(Fault::invalid_value("0..=30 dBm"));
+            }
+            self.hal.power.store(dbm, Ordering::Relaxed);
+            Ok(())
+        }
+
+        #[rbus(method)] // Device.WiFi.Radio.{i}.Reset()
+        async fn reset(&self, cx: &Context, args: ResetArgs) -> Result<ResetReply, Fault> {
+            let [radio] = cx.instances()?;
+            Ok(ResetReply {
+                radio,
+                after: args.delay,
+            })
+        }
+    }
+}
+
+/// 4.9 Provider: an impl block under the 4.8 model's rows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn design_4_9_impl_block_under_a_model() -> rbus::Result<()> {
+    use common::{rbuscli, rbuscli_values};
+    use radio_driver::{Hal, RadioDriver};
+    use wifi::{Radio, Wifi};
+
+    let turn = common::Turn::take(&WIFI).await;
+    let bus = Rbus::connect("com.example.wifi").await?;
+    let hal = Hal::default();
+    let wifi = bus.provide(Wifi::default()).await?; // several providers can mount under one component;
+    let driver = bus.provide(RadioDriver::new(hal)).await?; // overlapping names are rejected at registration
+    let radio = wifi.radios.insert(Radio::default())?;
+
+    let consumer = Rbus::connect("com.example.wifi-tool").await?;
+    let noise: i32 = consumer
+        .get(format!("Device.WiFi.Radio.{radio}.Noise"))
+        .await?;
+    assert_eq!(noise, -91);
+    // One partial-path get spans both providers.
+    let tree = consumer
+        .get_tree(format!("Device.WiFi.Radio.{radio}."))
+        .await?;
+    let names: Vec<String> = tree.iter().map(|(n, _)| n.to_string()).collect();
+    assert!(names.iter().any(|n| n.ends_with(".Enable")), "{names:?}");
+    assert!(names.iter().any(|n| n.ends_with(".Noise")), "{names:?}");
+
+    let out = rbuscli(&[
+        "set",
+        &format!("Device.WiFi.Radio.{radio}.TransmitPower"),
+        "int",
+        "20",
+    ])
+    .await;
+    assert!(out.contains("succeeded"), "{out}");
+    let out = rbuscli(&["get", &format!("Device.WiFi.Radio.{radio}.TransmitPower")]).await;
+    assert_eq!(rbuscli_values(&out)[0].1, "20", "{out}");
+    let err = consumer
+        .set(format!("Device.WiFi.Radio.{radio}.TransmitPower"), 99i32)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.status(),
+        Some(rbus::Status::InvalidParameterValue),
+        "{err:?}"
+    );
+
+    #[derive(Serialize)]
+    struct Args {
+        delay: u32,
+    }
+    #[derive(Deserialize)]
+    struct Reply {
+        radio: u32,
+        after: u32,
+    }
+    let reply: Reply = consumer
+        .invoke(
+            format!("Device.WiFi.Radio.{radio}.Reset()"),
+            Args { delay: 4 },
+        )
+        .await?;
+    assert_eq!((reply.radio, reply.after), (radio, 4));
+    // Overlapping names are rejected.
+    let again = bus
+        .provide(RadioDriver::new(Hal::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(again.status(), Some(rbus::Status::ElementNameDuplicate));
+    drop(driver);
+    turn.release(wifi, "Device.WiFi.Enable").await;
+    Ok(())
+}
+
+/// 4.9 Provider: the `DataModel` builder.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn design_4_9_data_model_builder() -> rbus::Result<()> {
+    use common::{rbuscli, rbuscli_values};
+    use rbus::provider::DataModel;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+    let bus = Rbus::connect("com.example.sample").await?;
+    let counter = Arc::new(AtomicU32::new(5));
+    let model = DataModel::new()
+        .property("Device.Sample.Counter", move |_cx| {
+            let c = counter.clone();
+            async move { Ok(c.load(Relaxed)) }
+        })
+        .method("Device.Sample.Reset()", |_cx, _args: Object| async {
+            Ok(Object::new())
+        });
+    let _provided = bus.provide(model).await?;
+
+    let out = rbuscli(&["get", "Device.Sample.Counter"]).await;
+    assert_eq!(rbuscli_values(&out)[0].1, "5", "{out}");
+    let consumer = Rbus::connect("com.example.sample-tool").await?;
+    let () = consumer.invoke("Device.Sample.Reset()", ()).await?;
+    Ok(())
+}
+
+/// The 4.11 bridge, as design.md writes it, with a stand-in for the
+/// component that serves `Device.DeviceInfo.UpTime`.
+mod bridge {
+    use rbus::Rbus;
+    use rbus::provider::{Event, Prop};
+    use serde::Serialize;
+
+    #[derive(rbus::Model, Default)]
+    #[rbus(path = "Device.Bridge.")]
+    struct Bridge {
+        last_uptime: Prop<u32>,
+        rebooted: Event<Rebooted>,
+    }
+
+    #[derive(Serialize)]
+    struct Rebooted {
+        uptime_before: u32,
+    }
+
+    pub async fn main(bus: Rbus) -> rbus::Result<()> {
+        let bridge = bus.provide(Bridge::default()).await?;
+
+        let mut uptime = bus
+            .subscribe_value::<u32>("Device.DeviceInfo.UpTime")
+            .initial_value()
+            .await?;
+        while let Some(item) = uptime.next().await {
+            let Ok(change) = item else { continue }; // skip Lagged
+            let last = bridge.last_uptime.get();
+            if change.new < last {
+                bridge.rebooted.publish(Rebooted {
+                    uptime_before: last,
+                })?;
+            }
+            bridge.last_uptime.set(change.new);
+        }
+        Ok(())
+    }
+}
+
+/// 4.11 Consumer and provider in one app.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn design_4_11_bridge_consumes_and_provides() -> rbus::Result<()> {
+    use common::within;
+    use rbus::provider::Prop;
+
+    // The device: its uptime goes 100, 200, then 5 after a reboot.
+    #[derive(rbus::Model, Default)]
+    #[rbus(path = "Device.DeviceInfo.")]
+    struct DeviceInfo {
+        #[rbus(name = "UpTime")]
+        up_time: Prop<u32>,
+    }
+    let device_bus = Rbus::connect("com.example.device").await?;
+    let device = device_bus.provide(DeviceInfo::default()).await?;
+    device.up_time.set(100);
+
+    let bridge = tokio::spawn(bridge::main(Rbus::connect("com.example.bridge").await?));
+    let watcher = Rbus::connect("com.example.bridge-watcher").await?;
+    #[derive(Deserialize)]
+    struct Rebooted {
+        uptime_before: u32,
+    }
+    let mut reboots = watcher
+        .subscribe::<Rebooted>("Device.Bridge.Rebooted!")
+        .retry(rbus::Retry::exponential().max_elapsed(Duration::from_secs(10)))
+        .await?;
+    let mut last = watcher
+        .subscribe_value::<u32>("Device.Bridge.LastUptime")
+        .initial_value()
+        .await?;
+    while within(5, last.next()).await.unwrap().unwrap().new != 100 {}
+    device.up_time.set(200);
+    while within(5, last.next()).await.unwrap().unwrap().new != 200 {}
+    device.up_time.set(5);
+    let reboot = within(5, reboots.next()).await.unwrap().unwrap();
+    assert_eq!(reboot.uptime_before, 200);
+    bridge.abort();
     Ok(())
 }

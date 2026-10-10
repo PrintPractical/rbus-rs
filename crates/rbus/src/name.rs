@@ -22,6 +22,29 @@
 //! assert_eq!(UPTIME.as_str(), "Device.DeviceInfo.UpTime");
 //! # let _ = REBOOT;
 //! ```
+//!
+//! With the `macros` feature (on by default), `rbus::name!` checks a literal
+//! while compiling and picks the type from its suffix:
+//!
+//! ```
+//! # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
+//! use rbus::{MethodName, PropertyName, name};
+//!
+//! const ENABLE: PropertyName = name!("Device.WiFi.Radio.1.Enable");
+//! const REBOOT: MethodName = name!("Device.Reboot()");
+//! bus.invoke::<_, ()>(REBOOT, ()).await?;
+//! # let _ = ENABLE;
+//! # Ok(()) }
+//! ```
+//!
+//! A name of the wrong kind doesn't compile:
+//!
+//! ```compile_fail
+//! # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
+//! const ENABLE: rbus::PropertyName = rbus::name!("Device.WiFi.Radio.1.Enable");
+//! bus.invoke::<_, ()>(ENABLE, ()).await?; // a PropertyName is not a MethodName
+//! # Ok(()) }
+//! ```
 
 use std::borrow::{Borrow, Cow};
 use std::fmt;

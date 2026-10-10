@@ -95,6 +95,7 @@ impl Element {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Schema {
     elements: Vec<Element>,
+    serialized: bool,
 }
 
 impl Schema {
@@ -154,6 +155,19 @@ impl Schema {
         self
     }
 
+    /// Serves the provider's requests one at a time, in arrival order, as
+    /// [`Provide::serialized`](crate::provider::Provide::serialized) does.
+    /// `#[rbus(serialized)]` on a model or impl block sets this.
+    pub fn serialized(mut self) -> Self {
+        self.serialized = true;
+        self
+    }
+
+    /// True if [`Schema::serialized`] was called.
+    pub fn is_serialized(&self) -> bool {
+        self.serialized
+    }
+
     /// The elements, in order.
     pub fn elements(&self) -> &[Element] {
         &self.elements
@@ -180,5 +194,6 @@ mod tests {
         assert_eq!(p.elements()[0].poll(), Some(Duration::from_secs(2)));
         assert_eq!(s.elements()[0].poll(), None);
         assert!(Schema::new().poll(Duration::ZERO).elements().is_empty());
+        assert!(!s.is_serialized() && Schema::new().serialized().is_serialized());
     }
 }

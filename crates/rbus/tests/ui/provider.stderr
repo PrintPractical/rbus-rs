@@ -1,0 +1,49 @@
+error: `#[rbus::provider]` needs a path: #[rbus::provider(path = "Device.Example.")]
+ --> tests/ui/provider.rs:5:1
+  |
+5 | #[rbus::provider]
+  | ^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `rbus::provider` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: each function is one of `get`, `set` or `method`
+  --> tests/ui/provider.rs:17:5
+   |
+17 |     #[rbus(get, set)]
+   |     ^^^^^^^^^^^^^^^^^
+
+error: a period's unit is ms, s or m: "500ms", "2s" or "1m"
+  --> tests/ui/provider.rs:27:24
+   |
+27 |     #[rbus(get, poll = "2 sec")]
+   |                        ^^^^^^^
+
+error: `poll` goes with `get`
+  --> tests/ui/provider.rs:37:24
+   |
+37 |     #[rbus(set, poll = "2s")]
+   |                        ^^^^
+
+error: a setter takes `&self`, `cx: &Context` and the new value
+  --> tests/ui/provider.rs:47:12
+   |
+47 |     #[rbus(set)]
+   |            ^^^
+
+error: no `#[rbus(get)]`, `#[rbus(set)]` or `#[rbus(method)]` functions to serve
+  --> tests/ui/provider.rs:56:6
+   |
+56 | impl Nothing {
+   |      ^^^^^^^
+
+error: `Value` has two functions for the same role
+  --> tests/ui/provider.rs:69:8
+   |
+69 |     fn other(&self, _cx: &Context) -> Result<u32, Fault> {
+   |        ^^^^^
+
+error: a member name is one path segment: no '.', '*', '[', ']', '{', '}' or "()"
+  --> tests/ui/provider.rs:78:21
+   |
+78 |     #[rbus(method = "Do.It()")]
+   |                     ^^^^^^^^^
