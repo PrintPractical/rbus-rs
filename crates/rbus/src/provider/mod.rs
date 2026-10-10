@@ -1,7 +1,7 @@
 //! Serving a data model to the bus.
 //!
 //! There are three ways to write a provider, and all of them are a
-//! [`Provider`] in the end (decisions.md D3):
+//! [`Provider`] in the end:
 //!
 //! - `#[derive(rbus::Model)]` on a struct of [`Prop`]s, [`Table`]s and
 //!   [`Event`]s: rbus serves the stored state and publishes its changes.
@@ -119,7 +119,7 @@ pub(crate) use handle::element_error;
 use crate::name::{MethodName, PropertyName, TablePath};
 use crate::table::RowId;
 
-/// A data model served on the bus (decisions.md D3). The derive and
+/// A data model served on the bus. The derive and
 /// attribute macros generate implementations of this trait; you can also
 /// write one by hand.
 ///

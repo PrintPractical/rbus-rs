@@ -1,5 +1,5 @@
 //! A provider declared as a struct: rbus serves gets, applies sets, keeps
-//! the table's rows and publishes every change (design.md 4.8).
+//! the table's rows and publishes every change.
 //!
 //! ```sh
 //! cargo run --example provider_model

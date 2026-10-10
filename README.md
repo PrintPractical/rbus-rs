@@ -8,7 +8,7 @@ rbus-rs speaks the `rtrouted` wire protocol directly. There is no C library to l
 - **Provide:** declare a data model as a struct and rbus serves gets, applies sets, keeps table rows and publishes every change. Impl blocks, a builder and a plain `Provider` trait are there when you need more control.
 - **Interop-tested:** CI runs the suite against the real `rtrouted`, `rbuscli` and rbus's own conformance programs.
 
-> **Status:** pre-release (0.x): the API may still change.
+> **Status:** experimental, pre-1.0. The API may still change. rbus-rs reimplements the protocol rather than linking the C library, so a change to RDK's rbus or `rtrouted` can break compatibility until rbus-rs catches up; see [Compatibility](#compatibility) for the version it is tested against.
 
 The RBUS protocol and its reference implementation are [RDK's rbus](https://github.com/rdkcentral/rbus) (Apache-2.0). rbus-rs is an independent reimplementation that contains no rbus code. The C sources served as the protocol reference, and the C programs serve as interop test peers.
 
@@ -37,7 +37,7 @@ Every crate is `#![forbid(unsafe_code)]`, and no dependency links a native libra
 
 ## Quick start
 
-A consumer:
+### Consumer
 
 ```rust,no_run
 use rbus::Rbus;
@@ -68,7 +68,11 @@ async fn main() -> rbus::Result<()> {
 }
 ```
 
-A provider, declared as a struct:
+### Providers
+
+There are three ways to write a provider. All three implement the same `rbus::provider::Provider` trait, which you can also implement by hand. A connection can serve several providers at once, in any mix of styles.
+
+**1. A struct of state** (`#[derive(Model)]`). Declare the data model, and rbus serves gets, applies sets, keeps table rows and publishes every change. Most of a TR-181 model is plain data, so this is the usual choice.
 
 ```rust,no_run
 use rbus::provider::{Event, Prop, Table};
@@ -111,6 +115,93 @@ async fn main() -> rbus::Result<()> {
 }
 ```
 
+**2. An impl block** (`#[rbus::provider]`). Annotated functions serve values computed on demand, setters and methods. The path may hold `{i}` templates, and `cx.instances()` says which row a request is for.
+
+```rust,no_run
+use rbus::provider::{Context, Fault};
+use rbus::Rbus;
+use serde::{Deserialize, Serialize};
+
+struct Radios;
+
+#[derive(Deserialize)]
+struct ScanArgs {
+    seconds: u32,
+}
+
+#[derive(Serialize)]
+struct ScanReply {
+    radio: u32,
+    networks: u32,
+}
+
+#[rbus::provider(path = "Device.Example.Radio.{i}.")]
+impl Radios {
+    #[rbus(get)]                       // Device.Example.Radio.{i}.Noise
+    async fn noise(&self, cx: &Context) -> Result<i32, Fault> {
+        let [radio] = cx.instances()?;
+        Ok(-90 - radio as i32)
+    }
+
+    #[rbus(set = "Channel")]           // Device.Example.Radio.{i}.Channel
+    async fn set_channel(&self, _cx: &Context, channel: u32) -> Result<(), Fault> {
+        if !(1..=165).contains(&channel) {
+            return Err(Fault::invalid_value("channel"));
+        }
+        Ok(())
+    }
+
+    #[rbus(method)]                    // Device.Example.Radio.{i}.Scan()
+    async fn scan(&self, cx: &Context, args: ScanArgs) -> Result<ScanReply, Fault> {
+        let [radio] = cx.instances()?;
+        Ok(ScanReply { radio, networks: args.seconds * 2 })
+    }
+}
+
+#[tokio::main]
+async fn main() -> rbus::Result<()> {
+    let bus = Rbus::connect("com.example.radios").await?;
+    let radios = bus.provide(Radios).await?;
+    radios.add_row("Device.Example.Radio.", 1)?;          // the rows this provider serves
+    std::future::pending::<()>().await;
+    Ok(())
+}
+```
+
+**3. A builder** (`DataModel`). Closures serve names that are known only at run time, such as a model read from a configuration file.
+
+```rust,no_run
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use rbus::provider::DataModel;
+use rbus::{Object, Rbus};
+
+#[tokio::main]
+async fn main() -> rbus::Result<()> {
+    let bus = Rbus::connect("com.example.counter").await?;
+    let count = Arc::new(AtomicU32::new(0));
+    let model = DataModel::new()
+        .property("Device.Counter.Value", {
+            let count = count.clone();
+            move |_cx| {
+                let count = count.clone();
+                async move { Ok(count.load(Ordering::Relaxed)) }
+            }
+        })
+        .method("Device.Counter.Increment()", move |_cx, _args: Object| {
+            let count = count.clone();
+            async move {
+                let value = count.fetch_add(1, Ordering::Relaxed) + 1;
+                Ok(Object::new().with("value", value))
+            }
+        });
+    let _counter = bus.provide(model).await?;
+    std::future::pending::<()>().await;
+    Ok(())
+}
+```
+
 The [examples](https://github.com/PrintPractical/rbus-rs/tree/main/crates/rbus/examples) have more: `consumer.rs`, `provider_model.rs` and `bridge.rs`, a component that consumes and provides on one connection. The rustdoc for `rbus` covers the whole API.
 
 ## Compatibility
@@ -124,19 +215,19 @@ The [examples](https://github.com/PrintPractical/rbus-rs/tree/main/crates/rbus/e
 
 ## Features
 
-Every feature has integration tests against the real broker, named after its ID (`c3_...`, `l5_...`).
+Every feature has integration tests against the real broker.
 
 | Area | Supported |
 | --- | --- |
-| Connection | Unix socket (L1); reconnect after a broker restart, with a `state()` watch (L5); per-operation default timeouts (L6); graceful close, plus best-effort cleanup on drop (L13) |
-| Values | Every scalar type, plus DateTime (`time` feature), objects and property lists (V1–V4); conversions to native types (V5); serde for values and objects (V6); legacy CCSP values (V7) |
-| Get and set | One value or many (C1, C2); partial paths and wildcards as a `Tree`, with per-component failures reported (C3–C5); set and batch set as transactions that name the failing parameter (C6, C7, C9) |
-| Tables and methods | Add, remove and list rows, with aliases (T1–T3); methods with serde arguments and results, and typed errors (M1, M3) |
-| Discovery | Element owners, component elements, all components, connect and disconnect advisories (D1, D2, D4, D5) |
-| Events | Typed streams for value changes, table rows and general events (E1–E5); initial value (E9); retry until the provider appears (E10); a bounded buffer that reports lag, or applies backpressure |
-| Providers | Properties, events and methods with async handlers (P1–P5); caller identity (P7); subscription hooks (P8); value-change events, including from state (P9, P11); provider-side filters (P12); initial values (P15); direct-mode requests rejected (P19) |
-| Provider tables | Row templates, consumer and app rows, aliases, nested tables (PT1–PT5); partial-path gets over the model (PT8); row events (PT9); row names for `rbuscli` (PT10) |
-| Cross-cutting | `tracing` spans per operation (X1); a typed `Error` and `Status` (X3); legacy CCSP codes (X4); both header sizes (X5); tokio (X8); configurable limits on what peers send (`RbusBuilder::limits`) |
+| Connection | Unix socket; reconnect after a broker restart, with a `state()` watch; per-operation default timeouts; graceful close, plus best-effort cleanup on drop |
+| Values | Every scalar type, plus DateTime (`time` feature), objects and property lists; conversions to native types; serde for values and objects; legacy CCSP values |
+| Get and set | One value or many; partial paths and wildcards as a `Tree`, with per-component failures reported; set and batch set as transactions that name the failing parameter |
+| Tables and methods | Add, remove and list rows, with aliases; methods with serde arguments and results, and typed errors |
+| Discovery | Element owners, component elements, all components, connect and disconnect advisories |
+| Events | Typed streams for value changes, table rows and general events; initial value; retry until the provider appears; a bounded buffer that reports lag, or applies backpressure |
+| Providers | Properties, events and methods with async handlers; caller identity; subscription hooks; value-change events, including from state; provider-side filters; initial values; direct-mode requests rejected |
+| Provider tables | Row templates, consumer and app rows, aliases, nested tables; partial-path gets over the model; row events; row names for `rbuscli` |
+| Cross-cutting | `tracing` spans per operation; a typed `Error` and `Status`; legacy CCSP codes; both header sizes; tokio; configurable limits on what peers send (`RbusBuilder::limits`) |
 
 ## Not supported
 
@@ -152,13 +243,13 @@ Every feature has integration tests against the real broker, named after its ID 
   - the C timeout environment variables and override files.
 - **Per-call timeouts:** use `tokio::time::timeout`. Dropping a request future cancels it and leaves nothing behind. A `set_many` that spans several providers goes to them one at a time, so cancelling it part-way can leave the earlier ones' sets applied.
 - **Planned after 0.1:**
-  - parsing values from strings (V8);
-  - consumer-side event filters (E6);
-  - multiplexed event streams (E14);
-  - auto-publish by polling getters (P10);
-  - persisting a provider's subscribers across restarts (P17);
-  - dynamic table sync and hidden rows (PT6, PT7);
-  - OpenTelemetry trace propagation (X2).
+  - parsing values from strings;
+  - consumer-side event filters;
+  - multiplexed event streams;
+  - auto-publish by polling getters;
+  - persisting a provider's subscribers across restarts;
+  - dynamic table sync and hidden rows;
+  - OpenTelemetry trace propagation.
 
 ## Running the tests
 

@@ -1,8 +1,7 @@
-//! The design.md section 4 examples, run against real providers and
-//! consumers. Consumer examples swap element names for ones the C peers
-//! serve; provider examples keep their names and are checked from `rbuscli`
-//! and Rust consumers. `.reconnect(..)` arrives with M7. Run with
-//! `scripts/interop.sh`.
+//! The API's showcase examples, run against real providers and consumers.
+//! Consumer examples swap element names for ones the C peers serve;
+//! provider examples keep their names and are checked from `rbuscli` and
+//! Rust consumers. Run with `scripts/interop.sh`.
 
 mod common;
 
@@ -13,7 +12,7 @@ use rbus::{ConnectionState, Error, MethodName, Object, PropertyName, Rbus, Value
 use rbus_testkit::broker::broker_socket;
 use serde::{Deserialize, Serialize};
 
-/// 4.4 Connecting and lifecycle.
+/// Connecting and lifecycle.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_4_connecting_and_lifecycle() -> rbus::Result<()> {
@@ -49,7 +48,7 @@ struct RebootArgs {
     reason: String,
 }
 
-/// 4.5 Names and values.
+/// Names and values.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_5_names_and_values() -> rbus::Result<()> {
@@ -97,7 +96,7 @@ struct Named {
     name: String,
 }
 
-/// 4.6 Consumer API: get, set and methods.
+/// Consumer API: get, set and methods.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_6_consumer_get_set_invoke() -> rbus::Result<()> {
@@ -150,7 +149,7 @@ struct PartialRow {
     param1: String,
 }
 
-/// 4.6 Consumer API: trees, tables and discovery.
+/// Consumer API: trees, tables and discovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_6_trees_tables_discovery() -> rbus::Result<()> {
@@ -195,7 +194,7 @@ struct Tick {
     index: i32,
 }
 
-/// 4.7 Subscriptions as typed streams.
+/// Subscriptions as typed streams.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_7_subscriptions() -> rbus::Result<()> {
@@ -251,10 +250,10 @@ async fn design_4_7_subscriptions() -> rbus::Result<()> {
     Ok(())
 }
 
-/// The 4.8 and 4.9 examples both serve `Device.WiFi.`, so they take turns.
+/// The model and impl-block examples both serve `Device.WiFi.`, so they take turns.
 static WIFI: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The 4.8 model, as design.md writes it.
+/// The state-backed model example.
 mod wifi {
     use rbus::provider::{Context, Event, Fault, Prop, Table};
     use serde::Serialize;
@@ -304,7 +303,7 @@ struct AlarmData {
     text: String,
 }
 
-/// 4.8 Provider: state-backed models.
+/// Provider: a state-backed model.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_8_state_backed_model() -> rbus::Result<()> {
@@ -405,7 +404,7 @@ async fn design_4_8_state_backed_model() -> rbus::Result<()> {
     Ok(())
 }
 
-/// The 4.9 impl block, as design.md writes it, over a fake radio HAL.
+/// The impl-block example, over a fake radio HAL.
 mod radio_driver {
     use rbus::provider::{Context, Fault};
     use serde::{Deserialize, Serialize};
@@ -478,7 +477,7 @@ mod radio_driver {
     }
 }
 
-/// 4.9 Provider: an impl block under the 4.8 model's rows.
+/// Provider: an impl block under the model's rows.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_9_impl_block_under_a_model() -> rbus::Result<()> {
@@ -553,7 +552,7 @@ async fn design_4_9_impl_block_under_a_model() -> rbus::Result<()> {
     Ok(())
 }
 
-/// 4.9 Provider: the `DataModel` builder.
+/// Provider: the `DataModel` builder.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_9_data_model_builder() -> rbus::Result<()> {
@@ -581,7 +580,7 @@ async fn design_4_9_data_model_builder() -> rbus::Result<()> {
     Ok(())
 }
 
-/// The 4.11 bridge, as design.md writes it, with a stand-in for the
+/// The bridge example, with a stand-in for the
 /// component that serves `Device.DeviceInfo.UpTime`.
 mod bridge {
     use rbus::Rbus;
@@ -621,7 +620,7 @@ mod bridge {
     }
 }
 
-/// 4.11 Consumer and provider in one app.
+/// Consumer and provider in one app.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn design_4_11_bridge_consumes_and_provides() -> rbus::Result<()> {

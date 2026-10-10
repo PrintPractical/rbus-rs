@@ -1,4 +1,4 @@
-//! One connection that consumes and provides (design.md 4.11): it watches
+//! One connection that consumes and provides: it watches
 //! another component's uptime and publishes its own event when that
 //! component restarts.
 //!

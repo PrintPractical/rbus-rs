@@ -77,7 +77,7 @@ pub use tree::{Tree, TreeFailure};
 pub use types::{IntoValue, RbusType};
 
 /// Typed names checked while compiling; derives and the impl-block
-/// attribute for providers (design.md 4.5, 4.8, 4.9).
+/// attribute for providers.
 #[cfg(feature = "macros")]
 pub use rbus_macros::{Model, Row, name, provider};
 

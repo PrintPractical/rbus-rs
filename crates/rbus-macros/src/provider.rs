@@ -1,5 +1,4 @@
-//! `#[rbus::provider]` on an impl block: computed values and methods
-//! (design.md 4.9).
+//! `#[rbus::provider]` on an impl block: computed values and methods.
 
 use proc_macro2::{Span, TokenStream};
 use quote::quote;

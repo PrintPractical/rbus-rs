@@ -1,4 +1,4 @@
-//! A provider built at run time from closures (design.md 4.9).
+//! A provider built at run time from closures.
 
 use std::collections::HashMap;
 use std::fmt;

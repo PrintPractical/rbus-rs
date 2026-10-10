@@ -1,5 +1,5 @@
-//! The traits `#[derive(Model)]` and `#[derive(Row)]` implement (design.md
-//! 4.8). The derives only describe a struct's members; the work of serving
+//! The traits `#[derive(Model)]` and `#[derive(Row)]` implement. The
+//! derives only describe a struct's members; the work of serving
 //! them is done here, in the provided methods.
 //!
 //! Members are addressed by paths relative to their struct: `Radio.3.Channel`

@@ -5,7 +5,7 @@
 //!   sending never blocks a caller and frames leave in the order they were
 //!   queued.
 //! - **Reads** happen in a reader task per socket. It matches each response to its
-//!   pending request by sequence number (wire-protocol.md section 3), routes
+//!   pending request by sequence number, routes
 //!   each event to its subscription by the echoed component id, fans out
 //!   broker advisories, and hands each request for our providers to
 //!   `provider::dispatch`: a task of its own, or the serial worker for
@@ -15,7 +15,7 @@
 //!   behind and a late response is discarded.
 //! - **Resubscription**: a connect advisory (another client joined the bus)
 //!   wakes a debounced task that re-sends every subscription, because a C
-//!   provider that restarted has forgotten ours (decisions.md D11).
+//!   provider that restarted has forgotten ours.
 //! - **Reconnect** (L5): when the socket is lost, the connection task fails
 //!   every pending request and, if the builder asked for it, connects again
 //!   with backoff. On the new socket it registers the inbox, the component and
