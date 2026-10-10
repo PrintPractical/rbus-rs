@@ -16,8 +16,14 @@
 //! is its bytes plus a NUL; a DateTime is the 48-byte C struct in host byte
 //! order. Legacy CCSP peers send type tags 0–11 with the value as a string;
 //! those are parsed on input and never produced.
+//!
+//! `Value`, `Object`, `Property` and `DateTime` implement serde's traits as
+//! plain data (a `Value` is an externally tagged enum such as `{"U32": 5}`), so
+//! they round-trip exactly through any format. The `rbus` crate recognises
+//! these types by their `$rbus::` serde names and maps them onto bus values.
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::msgpack::{Reader, Writer};
@@ -79,7 +85,9 @@ impl TypeTag {
 }
 
 /// A value carried on the bus.
-#[derive(Debug, Clone, PartialEq)]
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename = "$rbus::Value")]
 pub enum Value {
     /// `RBUS_BOOLEAN`
     Bool(bool),
@@ -224,8 +232,31 @@ fn one_byte(r: &mut Reader<'_>, ty: &'static str) -> Result<u8> {
     }
 }
 
+macro_rules! value_from {
+    ($($t:ty => $variant:ident),* $(,)?) => {$(
+        impl From<$t> for Value {
+            fn from(v: $t) -> Value {
+                Value::$variant(v)
+            }
+        }
+    )*};
+}
+
+value_from! {
+    bool => Bool, i8 => I8, u8 => U8, i16 => I16, u16 => U16, i32 => I32, u32 => U32,
+    i64 => I64, u64 => U64, f32 => F32, f64 => F64, String => String, Bytes => Bytes,
+    DateTime => DateTime, Vec<Property> => Properties, Object => Object,
+}
+
+impl From<&str> for Value {
+    fn from(v: &str) -> Value {
+        Value::String(v.to_owned())
+    }
+}
+
 /// A named value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename = "$rbus::Property")]
 pub struct Property {
     /// Fully qualified element name (or a key inside an object).
     pub name: String,
@@ -275,7 +306,8 @@ pub fn decode_properties(r: &mut Reader<'_>) -> Result<Vec<Property>> {
 }
 
 /// Whether an object is a single instance or a table row set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename = "$rbus::ObjectKind")]
 pub enum ObjectKind {
     /// `RBUS_OBJECT_SINGLE_INSTANCE`
     #[default]
@@ -286,7 +318,8 @@ pub enum ObjectKind {
 
 /// A structured value: named properties plus child objects. Method arguments,
 /// method results and event data are objects.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename = "$rbus::Object")]
 pub struct Object {
     /// Object name; often empty.
     pub name: String,
@@ -305,8 +338,8 @@ impl Object {
     }
 
     /// Adds a property, builder style.
-    pub fn with(mut self, name: impl Into<String>, value: Value) -> Self {
-        self.properties.push(Property::new(name, value));
+    pub fn with(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.properties.push(Property::new(name, value.into()));
         self
     }
 
@@ -357,7 +390,8 @@ impl Object {
 /// The C `rbusDateTime_t`: a `struct tm` with 32-bit fields plus a timezone
 /// offset. Fields keep C's conventions (`year` counts from 1900, `mon` is 0–11).
 /// As in C, an all-zero value means "no date" and `year == 0` is special-cased.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename = "$rbus::DateTime")]
 pub struct DateTime {
     /// Seconds, 0–60.
     pub sec: i32,
@@ -776,5 +810,34 @@ mod tests {
         assert_eq!(day_of_year(2000, 12, 31), 365);
         assert_eq!(day_of_year(2001, 12, 31), 364);
         assert!(is_leap(2000) && !is_leap(1900) && is_leap(2024) && !is_leap(2023));
+    }
+
+    #[test]
+    fn from_impls_pick_the_matching_type() {
+        assert_eq!(Value::from(true), Value::Bool(true));
+        assert_eq!(Value::from(1u16), Value::U16(1));
+        assert_eq!(Value::from(-1i64), Value::I64(-1));
+        assert_eq!(Value::from(0.5f32), Value::F32(0.5));
+        assert_eq!(Value::from("s"), Value::String("s".into()));
+        assert_eq!(Value::from(String::from("s")), Value::String("s".into()));
+        assert_eq!(Value::from(Object::new()), Value::Object(Object::new()));
+        assert_eq!(
+            Value::from(Vec::<Property>::new()),
+            Value::Properties(vec![])
+        );
+        assert_eq!(Object::new().with("a", 1u8).get("a"), Some(&Value::U8(1)));
+    }
+
+    #[test]
+    fn serde_form_is_tagged_and_exact() {
+        let mut o = Object::new()
+            .with("c", Value::Char(b'x'))
+            .with("d", DateTime::default())
+            .with("b", Bytes::from_static(b"\x01"));
+        o.children.push(Object::new().with("n", Value::None));
+        let json = serde_json::to_string(&Value::Object(o.clone())).unwrap();
+        assert!(json.starts_with(r#"{"Object":{"name":"","kind":"Single","properties":[{"name":"c","value":{"Char":120}}"#), "{json}");
+        let back: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Value::Object(o));
     }
 }

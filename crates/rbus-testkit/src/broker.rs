@@ -9,6 +9,8 @@ use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use crate::frame::{Frame, encode_frame, read_frame};
@@ -140,6 +142,27 @@ impl RawClient {
         self.control(TOPIC_REGISTERED_COMPONENTS, "{\"dummy\":0}")
     }
 
+    /// Polls [`RawClient::owner_of`] until `owner` no longer owns `element`,
+    /// for example while a killed provider's routes are being cleared.
+    pub fn wait_for_no_owner(
+        &mut self,
+        element: &str,
+        owner: &str,
+        timeout: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        while self.owner_of(element)?.contains(&format!("\"{owner}\"")) {
+            if Instant::now() > deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{owner} still owns {element} after {timeout:?}"),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
     /// Polls [`RawClient::owner_of`] until `owner` owns `element`, for example
     /// after starting a C provider.
     pub fn wait_for_owner(
@@ -162,6 +185,47 @@ impl RawClient {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+/// Peers started by [`shared_peer`], by program name.
+static SHARED: Mutex<Vec<(&'static str, Weak<Peer>)>> = Mutex::new(Vec::new());
+static NEXT_CLIENT: AtomicU32 = AtomicU32::new(0);
+
+/// A unique inbox name for a test client of this process.
+pub fn test_inbox(label: &str) -> String {
+    let n = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
+    format!("rbus.{label}-{n}.INBOX.{}", std::process::id())
+}
+
+/// Starts `program` once for every test in this process that asks while it is
+/// running, and waits until `owner` owns `element`.
+///
+/// C providers register fixed component names, and the broker delivers to
+/// every duplicate, so tests running in parallel must share one instance. The
+/// process is killed when the last `Arc` is dropped; a later call starts a new
+/// one after the old one's routes are gone.
+pub fn shared_peer(program: &'static str, args: &[&str], element: &str, owner: &str) -> Arc<Peer> {
+    let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(peer) = shared
+        .iter()
+        .find(|(p, _)| *p == program)
+        .and_then(|(_, w)| w.upgrade())
+    {
+        return peer;
+    }
+    let wait = Duration::from_secs(15);
+    let mut client = RawClient::connect(&test_inbox("testkit")).expect("connect to rtrouted");
+    client
+        .wait_for_no_owner(element, owner, wait)
+        .expect("previous instance did not go away");
+    let peer =
+        Arc::new(Peer::spawn(program, args).unwrap_or_else(|e| panic!("spawn {program}: {e}")));
+    client
+        .wait_for_owner(element, owner, wait)
+        .unwrap_or_else(|e| panic!("{program}: {e}"));
+    shared.retain(|(p, _)| *p != program);
+    shared.push((program, Arc::downgrade(&peer)));
+    peer
 }
 
 /// A C peer process (sample provider, rbuscli, test consumer) that is killed
