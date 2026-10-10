@@ -13,7 +13,7 @@ use tracing::debug;
 
 use crate::name::{PropertyName, TablePath};
 use crate::provider::{Context, Fault, Handle, Schema, SetFault, Transaction};
-use crate::subscribe::RowId;
+use crate::table::RowId;
 use crate::types::RbusType;
 
 /// A boxed future, as the derive traits' async methods return.
@@ -24,7 +24,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// trailing `.` is dropped, so a table path gives the table's segments.
 ///
 /// Fails with [`Fault::not_found`] if `name` isn't below `prefix`.
-pub fn relative<'a>(prefix: &str, name: &'a str) -> Result<Vec<&'a str>, Fault> {
+pub(crate) fn relative<'a>(prefix: &str, name: &'a str) -> Result<Vec<&'a str>, Fault> {
     let rest = name
         .strip_prefix(prefix)
         .filter(|r| !r.is_empty())

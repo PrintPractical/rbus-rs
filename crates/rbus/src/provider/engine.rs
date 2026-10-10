@@ -39,7 +39,7 @@ use crate::provider::model::{
 };
 use crate::provider::schema::{Rows, Schema};
 use crate::queue::Queue;
-use crate::subscribe::RowId;
+use crate::table::RowId;
 
 mod subs;
 
@@ -1104,7 +1104,7 @@ fn serve(
             Request::Set(r) => Some(r.component.clone()),
             _ => None,
         };
-        let cx = Context::new(caller, frame.header.reply_topic.clone(), span.clone());
+        let cx = Context::traced(caller, frame.header.reply_topic.clone(), span.clone());
         if matches!(request, Request::Subscribe(_, true)) {
             ensure_poller(&core);
         }

@@ -34,6 +34,7 @@ use crate::error::{Error, Result, Status, TypeError};
 use crate::name::{EventName, IntoName, Name, NameError, PropertyName, TablePath};
 use crate::queue::{Overflow, Popped, Queue};
 use crate::retry::Retry;
+use crate::table::RowId;
 use crate::types::RbusType;
 
 /// How long resubscription keeps retrying a provider that is still starting.
@@ -61,6 +62,7 @@ pub enum EventError {
 /// A property's new value (E3), or its current value when the subscription
 /// asked for one (E9).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ValueChange<T> {
     /// The property that changed: the instance name for a wildcard subscription.
     pub name: String,
@@ -72,24 +74,9 @@ pub struct ValueChange<T> {
     pub by: Option<String>,
 }
 
-/// A table row, by instance number and alias.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RowId {
-    /// Instance number.
-    pub inst: u32,
-    /// Alias, if the row has one. Removal events don't carry it.
-    pub alias: Option<String>,
-}
-
-impl From<u32> for RowId {
-    /// A row without an alias.
-    fn from(inst: u32) -> Self {
-        RowId { inst, alias: None }
-    }
-}
-
 /// A row added to or removed from a table (E4).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RowEvent {
     /// A row was added.
     Added {
@@ -375,6 +362,18 @@ pub struct SubscribeBuilder<'a, I> {
     overflow: Overflow,
 }
 
+impl<I> std::fmt::Debug for SubscribeBuilder<'_, I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscribeBuilder")
+            .field("name", &self.name.as_ref().ok())
+            .field("initial_value", &self.initial)
+            .field("retry", &self.retry)
+            .field("buffer", &self.buffer)
+            .field("overflow", &self.overflow)
+            .finish()
+    }
+}
+
 impl<'a, I> SubscribeBuilder<'a, I> {
     fn new(bus: &'a Rbus, name: Result<Name, NameError>, decode: Decode<I>) -> Self {
         SubscribeBuilder {
@@ -515,6 +514,7 @@ impl<'a, I: Send + 'static> IntoFuture for SubscribeBuilder<'a, I> {
 ///
 /// It implements [`Stream`]; [`Subscription::next`] works without importing
 /// a stream extension trait.
+#[must_use = "dropping a subscription unsubscribes"]
 pub struct Subscription<I> {
     bus: Rbus,
     id: i32,

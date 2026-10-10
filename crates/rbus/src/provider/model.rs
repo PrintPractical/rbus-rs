@@ -24,7 +24,7 @@ use rbus_wire::body::ElementName;
 use crate::error::Status;
 use crate::name::NameError;
 use crate::provider::schema::{Access, Element, ElementKind, Rows};
-use crate::subscribe::RowId;
+use crate::table::RowId;
 
 /// Identifies one registered provider.
 pub(crate) type MountId = u64;

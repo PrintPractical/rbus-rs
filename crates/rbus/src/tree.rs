@@ -15,6 +15,7 @@ use crate::name::{IntoName, Name};
 
 /// A component whose part of a [`Tree`] could not be read (C5).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct TreeFailure {
     /// The component.
     pub component: String,

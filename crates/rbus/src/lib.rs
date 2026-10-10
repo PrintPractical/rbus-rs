@@ -70,8 +70,8 @@ pub use queue::Overflow;
 pub use rbus_wire::Limits;
 pub use rbus_wire::value::{DateTime, Object, ObjectKind, Property, Value};
 pub use retry::Retry;
-pub use subscribe::{EventError, RowEvent, RowId, SubscribeBuilder, Subscription, ValueChange};
-pub use table::{AddRow, RowRef, Table};
+pub use subscribe::{EventError, RowEvent, SubscribeBuilder, Subscription, ValueChange};
+pub use table::{AddRow, RemoteTable, RowId, RowRef};
 pub use tree::{Tree, TreeFailure};
 pub use types::{IntoValue, RbusType};
 
@@ -80,5 +80,7 @@ pub use types::{IntoValue, RbusType};
 #[cfg(feature = "macros")]
 pub use rbus_macros::{Model, Row, name, provider};
 
-/// The wire codecs this crate is built on.
+/// The wire codecs this crate is built on. Hidden: its API follows its own
+/// versions, and nothing here needs it.
+#[doc(hidden)]
 pub use rbus_wire as wire;

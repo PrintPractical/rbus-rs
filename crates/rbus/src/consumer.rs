@@ -386,6 +386,17 @@ pub struct SetMany<'a> {
     props: Result<Vec<(PropertyName, Value)>>,
 }
 
+impl std::fmt::Debug for SetMany<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Option<Vec<&str>> = self
+            .props
+            .as_ref()
+            .ok()
+            .map(|p| p.iter().map(|(n, _)| n.as_str()).collect());
+        f.debug_struct("SetMany").field("names", &names).finish()
+    }
+}
+
 impl SetMany<'_> {
     /// Adds a property to set. An invalid name is reported when the
     /// transaction is awaited.

@@ -203,6 +203,11 @@ async fn connect_errors() {
         .connect()
         .await;
     assert!(matches!(missing, Err(Error::Io(_))));
+    // The builder awaits directly, like the other builders.
+    let awaited = Rbus::builder(String::from("c"))
+        .socket("/nonexistent/rtrouted")
+        .await;
+    assert!(matches!(awaited, Err(Error::Io(_))));
     let bad = Rbus::builder("bad name").connect().await;
     assert!(matches!(bad, Err(Error::Name(e)) if e.kind == "component"));
 }

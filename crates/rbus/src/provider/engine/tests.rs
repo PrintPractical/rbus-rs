@@ -122,7 +122,7 @@ impl Provider for Fake {
             "A.Coded()" => Err(Fault::new(Status::InvalidOperation)
                 .with_detail(Object::new().with("error_code", Value::I32(7)))),
             "A.T.2.Do()" => Ok(Object::new().with("row", Value::U32(cx.instances::<1>()?[0]))),
-            _ => Err(Fault::not_allowed()),
+            _ => Err(Fault::invalid_operation()),
         }
     }
 
@@ -205,7 +205,7 @@ fn registry() -> (Registry, Arc<Fake>) {
 }
 
 fn cx() -> Context {
-    Context::new(Some("caller".into()), "rbus.c.INBOX.1".into(), Span::none())
+    Context::traced(Some("caller".into()), "rbus.c.INBOX.1".into(), Span::none())
 }
 
 fn decode<B: Body>(payload: Vec<u8>) -> B {
@@ -478,7 +478,7 @@ async fn d8_legacy_sessions_are_per_inbox_bounded_and_dropped_with_the_caller() 
     let fake = Arc::new(Fake::new());
     r.mount(fake.schema(), fake.clone(), false).unwrap();
     r.add_local_row(0, "A.T.", RowId::from(1), &NoOut).unwrap();
-    let from = |inbox: &str| Context::new(Some("caller".into()), inbox.into(), Span::none());
+    let from = |inbox: &str| Context::traced(Some("caller".into()), inbox.into(), Span::none());
     let buffer = |inbox: &'static str, v: &'static str| {
         r.handle_test(
             set_req(&[("A.Name", Value::from(v))], false, 1),

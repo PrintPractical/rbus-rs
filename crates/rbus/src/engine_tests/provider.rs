@@ -245,7 +245,7 @@ async fn a_refused_alias_unregisters_the_others() {
         let f = expect_alias(&mut peer, 1, name, bus.inner.conn.component_route).await;
         peer.reply_json(&f, &ResultReply { result: 0 }).await;
     }
-    again.await.unwrap().unwrap();
+    let _registered = again.await.unwrap().unwrap();
 }
 
 #[tokio::test]

@@ -451,36 +451,54 @@ impl Object {
     }
 }
 
-/// The C `rbusDateTime_t`: a `struct tm` with 32-bit fields plus a timezone
-/// offset. Fields keep C's conventions (`year` counts from 1900, `mon` is 0–11).
-/// As in C, an all-zero value means "no date" and `year == 0` is special-cased.
+/// A date and time with a UTC offset, as RBUS carries it.
+///
+/// Use [`DateTime::from_parts`] and the accessors ([`DateTime::year`],
+/// [`DateTime::month`], ...), which follow Rust conventions, or the `time`
+/// feature of `rbus` for `time::OffsetDateTime`. It displays as ISO 8601.
+///
+/// On the wire it is C's `rbusDateTime_t`, a `struct tm` plus an offset; its
+/// raw fields, which keep C's conventions (`year` from 1900, `mon` 0–11), are
+/// public for the codecs only. As in C, an all-zero value means "no date".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename = "$rbus::DateTime")]
 pub struct DateTime {
     /// Seconds, 0–60.
+    #[doc(hidden)]
     pub sec: i32,
     /// Minutes, 0–59.
+    #[doc(hidden)]
     pub min: i32,
     /// Hours, 0–23.
+    #[doc(hidden)]
     pub hour: i32,
     /// Day of the month, 1–31.
+    #[doc(hidden)]
     pub mday: i32,
     /// Month, 0–11.
+    #[doc(hidden)]
     pub mon: i32,
     /// Years since 1900.
+    #[doc(hidden)]
     pub year: i32,
     /// Day of the week, 0–6 (Sunday = 0).
+    #[doc(hidden)]
     pub wday: i32,
     /// Day of the year, 0–365.
+    #[doc(hidden)]
     pub yday: i32,
     /// Daylight saving flag. C peers often leave it uninitialised; it is kept
     /// as received so values round-trip unchanged.
+    #[doc(hidden)]
     pub isdst: i32,
     /// Timezone offset hours.
+    #[doc(hidden)]
     pub tz_hour: i32,
     /// Timezone offset minutes.
+    #[doc(hidden)]
     pub tz_min: i32,
     /// True when the offset is west of UTC (negative).
+    #[doc(hidden)]
     pub tz_west: bool,
 }
 
@@ -498,6 +516,175 @@ impl DateTime {
             minutes * 60 + i64::from(self.sec),
         )
     }
+}
+
+impl DateTime {
+    /// A date-time from Rust conventions: the full year, month 1–12, day
+    /// 1–31, and the offset from UTC in minutes (east positive). `None` if a
+    /// part is out of range or the day doesn't exist. The day of the week
+    /// and of the year are filled in, as `mktime` would.
+    ///
+    /// ```
+    /// use rbus_wire::value::DateTime;
+    ///
+    /// let d = DateTime::from_parts(2026, 10, 10, 13, 5, 0, -300).unwrap();
+    /// assert_eq!((d.year(), d.month(), d.day()), (2026, 10, 10));
+    /// assert_eq!(d.offset_minutes(), -300);
+    /// assert_eq!(d.to_string(), "2026-10-10T13:05:00-05:00");
+    /// ```
+    pub fn from_parts(
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        offset_minutes: i32,
+    ) -> Option<DateTime> {
+        let leap = is_leap(year);
+        let days_in = [
+            31,
+            if leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let ok = (1..=12).contains(&month)
+            && day >= 1
+            && day <= days_in[usize::from(month) - 1]
+            && hour < 24
+            && minute < 60
+            && second <= 60
+            && offset_minutes.unsigned_abs() < 24 * 60
+            && year.checked_sub(1900).is_some();
+        if !ok {
+            return None;
+        }
+        let (month, day) = (i32::from(month), i32::from(day));
+        Some(DateTime {
+            sec: i32::from(second),
+            min: i32::from(minute),
+            hour: i32::from(hour),
+            mday: day,
+            mon: month - 1,
+            year: year - 1900,
+            wday: weekday(year, month, day),
+            yday: day_of_year(year, month, day),
+            isdst: 0,
+            tz_hour: (offset_minutes.unsigned_abs() / 60) as i32,
+            tz_min: (offset_minutes.unsigned_abs() % 60) as i32,
+            tz_west: offset_minutes < 0,
+        })
+    }
+
+    /// The full year: 2026, not 126.
+    pub fn year(&self) -> i32 {
+        self.year.saturating_add(1900)
+    }
+
+    /// The month, 1–12.
+    pub fn month(&self) -> i32 {
+        self.mon.saturating_add(1)
+    }
+
+    /// The day of the month, 1–31.
+    pub fn day(&self) -> i32 {
+        self.mday
+    }
+
+    /// The hour, 0–23.
+    pub fn hour(&self) -> i32 {
+        self.hour
+    }
+
+    /// The minute, 0–59.
+    pub fn minute(&self) -> i32 {
+        self.min
+    }
+
+    /// The second, 0–60 (60 for a leap second).
+    pub fn second(&self) -> i32 {
+        self.sec
+    }
+
+    /// The offset from UTC in minutes; negative west of Greenwich.
+    pub fn offset_minutes(&self) -> i32 {
+        let m = self.tz_hour.saturating_mul(60).saturating_add(self.tz_min);
+        if self.tz_west { -m } else { m }
+    }
+}
+
+impl std::fmt::Display for DateTime {
+    /// ISO 8601: `2026-10-10T13:05:00Z`, or with `±HH:MM`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            self.year(),
+            self.month(),
+            self.mday,
+            self.hour,
+            self.min,
+            self.sec
+        )?;
+        if self.tz_hour == 0 && self.tz_min == 0 {
+            f.write_str("Z")
+        } else {
+            let sign = if self.tz_west { '-' } else { '+' };
+            write!(f, "{sign}{:02}:{:02}", self.tz_hour, self.tz_min)
+        }
+    }
+}
+
+impl std::fmt::Display for Value {
+    /// The value as text: numbers and strings as they are, bytes as hex,
+    /// date-times as ISO 8601, and property lists and objects as
+    /// `{name: value, ...}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Bool(v) => write!(f, "{v}"),
+            Value::Char(v) => write!(f, "{}", char::from(*v)),
+            Value::Byte(v) | Value::U8(v) => write!(f, "{v}"),
+            Value::I8(v) => write!(f, "{v}"),
+            Value::I16(v) => write!(f, "{v}"),
+            Value::U16(v) => write!(f, "{v}"),
+            Value::I32(v) => write!(f, "{v}"),
+            Value::U32(v) => write!(f, "{v}"),
+            Value::I64(v) => write!(f, "{v}"),
+            Value::U64(v) => write!(f, "{v}"),
+            Value::F32(v) => write!(f, "{v}"),
+            Value::F64(v) => write!(f, "{v}"),
+            Value::DateTime(v) => write!(f, "{v}"),
+            Value::String(v) => f.write_str(v),
+            Value::Bytes(v) => v.iter().try_for_each(|b| write!(f, "{b:02x}")),
+            Value::Properties(props) => fmt_properties(f, props),
+            Value::Object(o) => {
+                fmt_properties(f, &o.properties)?;
+                o.children
+                    .iter()
+                    .try_for_each(|c| write!(f, " {}", Value::Object(c.clone())))
+            }
+            Value::None => f.write_str("none"),
+        }
+    }
+}
+
+fn fmt_properties(f: &mut std::fmt::Formatter<'_>, props: &[Property]) -> std::fmt::Result {
+    f.write_str("{")?;
+    for (i, p) in props.iter().enumerate() {
+        if i > 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{}: {}", p.name, p.value)?;
+    }
+    f.write_str("}")
 }
 
 /// Size of the C struct on the wire: nine `int32_t`, two `int32_t`, a `bool`
@@ -966,5 +1153,62 @@ mod tests {
         assert!(json.starts_with(r#"{"Object":{"name":"","kind":"Single","properties":[{"name":"c","value":{"Char":120}}"#), "{json}");
         let back: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Value::Object(o));
+    }
+
+    #[test]
+    fn datetimes_follow_rust_conventions_outside_and_c_inside() {
+        let d = DateTime::from_parts(2024, 2, 29, 23, 59, 60, 330).unwrap();
+        assert_eq!(
+            (
+                d.year(),
+                d.month(),
+                d.day(),
+                d.hour(),
+                d.minute(),
+                d.second()
+            ),
+            (2024, 2, 29, 23, 59, 60)
+        );
+        assert_eq!(d.offset_minutes(), 330);
+        // The C fields are what C's mktime would fill in.
+        assert_eq!((d.year, d.mon, d.yday, d.wday), (124, 1, 59, 4));
+        assert_eq!(d.to_string(), "2024-02-29T23:59:60+05:30");
+        assert_eq!(
+            DateTime::parse_iso8601(&d.to_string()).unwrap().to_bytes()[..44],
+            d.to_bytes()[..44]
+        );
+        let utc = DateTime::from_parts(1970, 1, 1, 0, 0, 0, 0).unwrap();
+        assert_eq!(
+            (utc.to_string(), utc.wday),
+            ("1970-01-01T00:00:00Z".into(), 4)
+        );
+        for bad in [
+            DateTime::from_parts(2023, 2, 29, 0, 0, 0, 0),
+            DateTime::from_parts(2024, 13, 1, 0, 0, 0, 0),
+            DateTime::from_parts(2024, 1, 0, 0, 0, 0, 0),
+            DateTime::from_parts(2024, 1, 1, 24, 0, 0, 0),
+            DateTime::from_parts(2024, 1, 1, 0, 0, 0, 24 * 60),
+            DateTime::from_parts(i32::MIN, 1, 1, 0, 0, 0, 0),
+        ] {
+            assert!(bad.is_none());
+        }
+    }
+
+    #[test]
+    fn values_display_as_text() {
+        let obj = Object::new().with("a", 1i32).with("b", "x");
+        let cases = [
+            (Value::Bool(true), "true"),
+            (Value::Char(b'z'), "z"),
+            (Value::U8(7), "7"),
+            (Value::F64(1.5), "1.5"),
+            (Value::String("hi".into()), "hi"),
+            (Value::Bytes(Bytes::from_static(&[0xde, 0xad])), "dead"),
+            (Value::Object(obj), "{a: 1, b: x}"),
+            (Value::None, "none"),
+        ];
+        for (v, text) in cases {
+            assert_eq!(v.to_string(), text);
+        }
     }
 }

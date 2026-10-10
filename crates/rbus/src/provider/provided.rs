@@ -10,13 +10,14 @@ use tracing::{Instrument, debug, debug_span};
 
 use crate::bus::Rbus;
 use crate::error::{Error, Result, Status};
-use crate::name::{IntoName, TablePath};
+use crate::name::{IntoName, Name, PropertyName, TablePath};
 use crate::provider::Provider;
 use crate::provider::engine::DynProvider;
 use crate::provider::events::{NoStore, SubscriberInfo, SubscriberStore, SubscriptionEvents};
 use crate::provider::handle::{Handle, element_error};
 use crate::provider::model::{MountId, SchemaError};
-use crate::subscribe::RowId;
+use crate::table::RowId;
+use crate::table::RowRef;
 use crate::types::IntoValue;
 
 impl Rbus {
@@ -50,6 +51,15 @@ pub struct Provide<P> {
     provider: P,
     serialized: bool,
     store: Arc<dyn SubscriberStore>,
+}
+
+impl<P> fmt::Debug for Provide<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Provide")
+            .field("provider", &std::any::type_name::<P>())
+            .field("serialized", &self.serialized)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<P: Provider> Provide<P> {
@@ -145,6 +155,7 @@ impl<P: Provider> IntoFuture for Provide<P> {
 ///
 /// It holds a clone of the [`Rbus`] it was registered on, so the connection
 /// stays open while it lives.
+#[must_use = "dropping a Provided unregisters the provider"]
 pub struct Provided<P> {
     provider: Arc<P>,
     bus: Rbus,
@@ -198,8 +209,12 @@ impl<P> Provided<P> {
     }
 
     /// Removes a row; see [`Handle::remove_row`].
-    pub fn remove_row(&self, table: impl IntoName<TablePath>, inst: u32) -> Result<()> {
-        self.handle.remove_row(table, inst)
+    pub fn remove_row(
+        &self,
+        table: impl IntoName<TablePath>,
+        row: impl Into<RowRef>,
+    ) -> Result<()> {
+        self.handle.remove_row(table, row)
     }
 
     /// The rows of a table, in the order they were added.
@@ -217,7 +232,11 @@ impl<P> Provided<P> {
     /// provided.publish("Device.WiFi.Alarm!", &Alarm { level: 3 })?;
     /// # Ok(()) }
     /// ```
-    pub fn publish<T: serde::Serialize + ?Sized>(&self, event: &str, data: &T) -> Result<()> {
+    pub fn publish<T: serde::Serialize + ?Sized>(
+        &self,
+        event: impl IntoName<Name>,
+        data: &T,
+    ) -> Result<()> {
         self.handle.publish(event, data)
     }
 
@@ -225,7 +244,7 @@ impl<P> Provided<P> {
     /// itself (P9); see [`Handle::publish_value_change`].
     pub fn publish_value_change(
         &self,
-        property: &str,
+        property: impl IntoName<PropertyName>,
         old: impl IntoValue,
         new: impl IntoValue,
     ) -> Result<()> {
@@ -234,7 +253,7 @@ impl<P> Provided<P> {
 
     /// Reads a property again and publishes the change, if any; see
     /// [`Handle::notify_changed`].
-    pub async fn notify_changed(&self, property: &str) -> Result<()> {
+    pub async fn notify_changed(&self, property: impl IntoName<PropertyName>) -> Result<()> {
         self.handle.notify_changed(property).await
     }
 

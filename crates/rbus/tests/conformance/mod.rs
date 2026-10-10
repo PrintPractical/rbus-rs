@@ -463,7 +463,7 @@ impl Computed {
     /// No getter in the C provider; the main loop publishes its changes.
     #[rbus(get = "NoAutoPubInt")]
     fn no_auto_pub_int(&self, _cx: &Context) -> Result<i32, Fault> {
-        Err(Fault::not_allowed())
+        Err(Fault::invalid_operation())
     }
 
     /// The C provider resets its own row data; the engine's rows stay, as

@@ -99,7 +99,7 @@ fn refused(status: Status) -> Vec<u8> {
 
 /// A context for reads the engine makes itself (baselines, polls).
 fn internal_cx(out: &dyn Outbox) -> Context {
-    Context::new(
+    Context::traced(
         Some(out.component().to_owned()),
         String::new(),
         Span::none(),

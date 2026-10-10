@@ -13,7 +13,7 @@ use crate::provider::{
 use crate::{PropertyName, TablePath};
 
 fn cx() -> Context {
-    Context::new(Some("c".into()), "rbus.c.INBOX.1".into(), Span::none())
+    Context::traced(Some("c".into()), "rbus.c.INBOX.1".into(), Span::none())
 }
 
 #[derive(serde::Serialize)]

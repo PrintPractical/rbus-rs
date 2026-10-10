@@ -5,7 +5,7 @@ use crate::msgpack::{Reader, Writer};
 use crate::value::{Object, Value};
 
 /// Relational operator of a filter (`rbusFilter_RelationOperator_t`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum RelationOp {
     /// `>`
@@ -32,7 +32,7 @@ const RELATION_OPS: [RelationOp; 6] = [
 ];
 
 /// A subscription filter: a relation against a value, or a logical combination.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Filter {
     /// `value <op> operand`.

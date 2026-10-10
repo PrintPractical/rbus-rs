@@ -25,21 +25,7 @@ pub(crate) enum Node {
 
 /// `YYYY-MM-DDTHH:MM:SS` plus `Z` or `±HH:MM`: how DateTime values read as text.
 pub(crate) fn iso8601(d: &DateTime) -> String {
-    let date = format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        d.year + 1900,
-        d.mon + 1,
-        d.mday,
-        d.hour,
-        d.min,
-        d.sec
-    );
-    if d.tz_hour == 0 && d.tz_min == 0 {
-        date + "Z"
-    } else {
-        let sign = if d.tz_west { '-' } else { '+' };
-        format!("{date}{sign}{:02}:{:02}", d.tz_hour, d.tz_min)
-    }
+    d.to_string()
 }
 
 fn datetime_fields(d: &DateTime) -> Value {

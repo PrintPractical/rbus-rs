@@ -122,7 +122,7 @@ fn setup() -> (Registry, Arc<Model>, Rec) {
 }
 
 fn cx(inbox: &str) -> Context {
-    Context::new(None, inbox.into(), Span::none())
+    Context::traced(None, inbox.into(), Span::none())
 }
 
 fn req(
@@ -175,7 +175,7 @@ async fn set(r: &Registry, out: &Rec, name: &str, value: Value) {
     });
     r.handle(
         req,
-        Context::new(Some("setter".into()), "i".into(), Span::none()),
+        Context::traced(Some("setter".into()), "i".into(), Span::none()),
         out,
     )
     .await;

@@ -13,21 +13,26 @@ use crate::names::{self, Kind};
 pub(crate) struct ProviderArgs {
     path: LitStr,
     serialized: bool,
+    /// `crate = "path"`: where `rbus` is, if not `::rbus`.
+    krate: Option<syn::Path>,
 }
 
 impl ProviderArgs {
     pub(crate) fn parse(args: TokenStream) -> Result<Self> {
         let mut path = None;
         let mut serialized = false;
+        let mut krate = None;
         let parser = syn::meta::parser(|meta| {
             if meta.path.is_ident("path") {
                 path = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("serialized") {
                 serialized = true;
+            } else if meta.path.is_ident("crate") {
+                krate = Some(crate::attrs::crate_path(&meta)?);
             } else {
-                return Err(
-                    meta.error("unknown rbus::provider option; expected `path` or `serialized`")
-                );
+                return Err(meta.error(
+                    "unknown rbus::provider option; expected `path`, `serialized` or `crate`",
+                ));
             }
             Ok(())
         });
@@ -38,7 +43,11 @@ impl ProviderArgs {
                 "`#[rbus::provider]` needs a path: #[rbus::provider(path = \"Device.Example.\")]",
             )
         })?;
-        Ok(ProviderArgs { path, serialized })
+        Ok(ProviderArgs {
+            path,
+            serialized,
+            krate,
+        })
     }
 }
 
@@ -218,6 +227,10 @@ struct Property {
 
 pub(crate) fn expand(args: ProviderArgs, mut item: ItemImpl) -> Result<TokenStream> {
     let path = check_path(&args.path, true)?;
+    let krate = args
+        .krate
+        .as_ref()
+        .map_or_else(|| quote!(::rbus), |p| quote!(#p));
     if let Some((_, trait_path, _)) = &item.trait_ {
         return Err(syn::Error::new(
             trait_path.span(),
@@ -272,7 +285,7 @@ pub(crate) fn expand(args: ProviderArgs, mut item: ItemImpl) -> Result<TokenStre
             }
         }
     }
-    let p = quote!(::rbus::provider);
+    let p = quote!(#krate::provider);
     let awaited = |ident: &Ident, asyncness: bool, args: TokenStream| {
         let call = quote!(Self::#ident(self, cx, #args));
         if asyncness { quote!(#call.await) } else { call }
@@ -299,7 +312,7 @@ pub(crate) fn expand(args: ProviderArgs, mut item: ItemImpl) -> Result<TokenStre
             let call = awaited(ident, *asyncness, quote!());
             gets.push(quote! {
                 #name => #call
-                    .map(::rbus::IntoValue::into_value)
+                    .map(#krate::IntoValue::into_value)
                     .map_err(::std::convert::Into::<#p::Fault>::into),
             });
         }
@@ -319,7 +332,7 @@ pub(crate) fn expand(args: ProviderArgs, mut item: ItemImpl) -> Result<TokenStre
         let (decode, pass) = match args {
             Some(ty) => (
                 quote! {
-                    let args: #ty = ::rbus::from_object(args)
+                    let args: #ty = #krate::from_object(args)
                         .map_err(|e| #p::Fault::invalid_input(::std::string::ToString::to_string(&e)))?;
                 },
                 quote!(args),
@@ -331,7 +344,7 @@ pub(crate) fn expand(args: ProviderArgs, mut item: ItemImpl) -> Result<TokenStre
             #name => {
                 #decode
                 let reply = #call.map_err(::std::convert::Into::<#p::Fault>::into)?;
-                ::rbus::to_object(&reply).map_err(#p::Fault::internal)
+                #krate::to_object(&reply).map_err(#p::Fault::internal)
             }
         });
     }
@@ -372,9 +385,9 @@ pub(crate) fn expand(args: ProviderArgs, mut item: ItemImpl) -> Result<TokenStre
             async fn invoke(
                 &self,
                 cx: &#p::Context,
-                method: &::rbus::MethodName,
-                args: ::rbus::Object,
-            ) -> ::std::result::Result<::rbus::Object, #p::Fault> {
+                method: &#krate::MethodName,
+                args: #krate::Object,
+            ) -> ::std::result::Result<#krate::Object, #p::Fault> {
                 let name = method.as_str();
                 match #leaf {
                     #(#invokes)*
@@ -400,8 +413,8 @@ pub(crate) fn expand(args: ProviderArgs, mut item: ItemImpl) -> Result<TokenStre
             async fn get(
                 &self,
                 cx: &#p::Context,
-                name: &::rbus::PropertyName,
-            ) -> ::std::result::Result<::rbus::Value, #p::Fault> {
+                name: &#krate::PropertyName,
+            ) -> ::std::result::Result<#krate::Value, #p::Fault> {
                 let name = name.as_str();
                 match #leaf {
                     #(#gets)*

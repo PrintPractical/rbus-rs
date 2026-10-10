@@ -17,7 +17,7 @@ use crate::provider::Handle;
 use crate::provider::derive::Row;
 use crate::provider::events::SubscriberInfo;
 use crate::provider::fault::Fault;
-use crate::subscribe::RowId;
+use crate::table::RowId;
 use crate::types::RbusType;
 
 /// Where a member lives once its model is registered.
@@ -112,6 +112,7 @@ impl<T: RbusType + Clone + PartialEq + Sync> Prop<T> {
     /// Sets the value without publishing anything. The derive macros store
     /// consumers' sets this way: the engine publishes those changes itself,
     /// by the setter.
+    #[doc(hidden)]
     pub fn store(&self, value: T) {
         *write(&self.value) = value;
     }
@@ -123,6 +124,7 @@ impl<T: RbusType + Clone + PartialEq + Sync> Prop<T> {
 
     /// Connects the property to its registered name, or disconnects it with
     /// `None`. The derive macros call this from [`Provider::attach`](crate::provider::Provider::attach).
+    #[doc(hidden)]
     pub fn bind(&self, name: impl Into<String>, handle: Option<&Handle>) {
         *lock(&self.bound) = handle.map(|h| Bound {
             handle: h.clone(),
@@ -174,6 +176,7 @@ impl<T> Event<T> {
 
     /// Connects the event to its registered name, or disconnects it with
     /// `None`. The derive macros call this from [`Provider::attach`](crate::provider::Provider::attach).
+    #[doc(hidden)]
     pub fn bind(&self, name: impl Into<String>, handle: Option<&Handle>) {
         *lock(&self.bound) = handle.map(|h| Bound {
             handle: h.clone(),
@@ -186,6 +189,7 @@ impl<T> Event<T> {
     }
 
     /// True once the event is connected to a registered name.
+    #[doc(hidden)]
     pub fn is_bound(&self) -> bool {
         lock(&self.bound).is_some()
     }
@@ -469,12 +473,14 @@ impl<R: Row> Table<R> {
     // generate.
 
     /// True once the table is connected to a registered path.
+    #[doc(hidden)]
     pub fn is_bound(&self) -> bool {
         self.read().bound.is_some()
     }
 
     /// Connects the table to its registered path (`Device.WiFi.Radio.`) and
     /// records the rows it already has, or disconnects it with `None`.
+    #[doc(hidden)]
     pub fn bind(&self, path: &str, handle: Option<&Handle>) {
         let mut state = self.write();
         state.bound = handle.map(|h| Bound {
@@ -500,6 +506,7 @@ impl<R: Row> Table<R> {
 
     /// Reads `path` below the table: an instance number, then the row's
     /// member.
+    #[doc(hidden)]
     pub fn get_path(&self, path: &[&str]) -> Result<Value, Fault> {
         let inst = Self::inst(path.first())?;
         let state = self.read();
@@ -508,6 +515,7 @@ impl<R: Row> Table<R> {
     }
 
     /// Checks or applies a consumer's set of `path` below the table.
+    #[doc(hidden)]
     pub fn set_path(&self, path: &[&str], value: &Value, apply: bool) -> Result<(), Fault> {
         let inst = Self::inst(path.first())?;
         let mut state = self.write();
@@ -517,6 +525,7 @@ impl<R: Row> Table<R> {
 
     /// A consumer adds `row` (PT2). The table records it with the engine,
     /// with the rows of the tables inside it.
+    #[doc(hidden)]
     pub fn insert_for(&self, alias: Option<&str>, row: R) -> Result<u32, Fault> {
         self.write()
             .insert(alias.map(str::to_owned), row)
@@ -528,6 +537,7 @@ impl<R: Row> Table<R> {
 
     /// A consumer removes a row. The engine forgets it and publishes the
     /// event.
+    #[doc(hidden)]
     pub fn remove_for(&self, row: &RowId) -> Result<(), Fault> {
         self.write()
             .take(row.inst)
@@ -537,6 +547,7 @@ impl<R: Row> Table<R> {
 
     /// A consumer adds a row to a table inside one of this table's rows:
     /// `path` is the row's instance number, then the path below it.
+    #[doc(hidden)]
     pub fn add_row_below<'a>(
         &'a self,
         cx: &'a crate::provider::Context,
@@ -552,6 +563,7 @@ impl<R: Row> Table<R> {
     }
 
     /// A consumer removes a row of a table inside one of this table's rows.
+    #[doc(hidden)]
     pub fn remove_row_below<'a>(
         &'a self,
         cx: &'a crate::provider::Context,

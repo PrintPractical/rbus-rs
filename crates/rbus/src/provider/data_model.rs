@@ -15,7 +15,7 @@ use crate::provider::derive::{BoxFuture, value_as};
 use crate::provider::{
     Access, Context, Fault, Handle, Provider, Rows, Schema, SetFault, Transaction,
 };
-use crate::subscribe::RowId;
+use crate::table::RowId;
 use crate::types::{IntoValue, RbusType};
 
 type Getter = Arc<dyn Fn(Context) -> BoxFuture<'static, Result<Value, Fault>> + Send + Sync>;
@@ -290,7 +290,7 @@ mod tests {
     use tracing::Span;
 
     fn cx() -> Context {
-        Context::new(Some("c".into()), "rbus.c.INBOX.1".into(), Span::none())
+        Context::traced(Some("c".into()), "rbus.c.INBOX.1".into(), Span::none())
     }
 
     fn tx(changes: &[(&'static str, Value)]) -> Transaction {

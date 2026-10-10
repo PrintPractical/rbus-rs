@@ -1,7 +1,9 @@
 //! The [`Rbus`] handle and its builder.
 
 use std::fmt;
+use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +19,14 @@ use rbus_wire::Limits;
 pub const DEFAULT_SOCKET: &str = "/tmp/rtrouted";
 
 /// Default timeouts per operation (L6). The defaults match the C library's.
+///
+/// ```
+/// use std::time::Duration;
+/// let t = rbus::Timeouts::default().with_set(Duration::from_secs(30));
+/// assert_eq!(t.get, Duration::from_secs(15));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Timeouts {
     /// `get` and `get_many`; 15 s.
     pub get: Duration,
@@ -47,6 +56,42 @@ impl Default for Timeouts {
 }
 
 impl Timeouts {
+    /// Sets [`Timeouts::get`].
+    pub fn with_get(mut self, d: Duration) -> Self {
+        self.get = d;
+        self
+    }
+
+    /// Sets [`Timeouts::set`].
+    pub fn with_set(mut self, d: Duration) -> Self {
+        self.set = d;
+        self
+    }
+
+    /// Sets [`Timeouts::set_many`].
+    pub fn with_set_many(mut self, d: Duration) -> Self {
+        self.set_many = d;
+        self
+    }
+
+    /// Sets [`Timeouts::invoke`].
+    pub fn with_invoke(mut self, d: Duration) -> Self {
+        self.invoke = d;
+        self
+    }
+
+    /// Sets [`Timeouts::broker`].
+    pub fn with_broker(mut self, d: Duration) -> Self {
+        self.broker = d;
+        self
+    }
+
+    /// Sets [`Timeouts::subscribe`].
+    pub fn with_subscribe(mut self, d: Duration) -> Self {
+        self.subscribe = d;
+        self
+    }
+
     /// The same timeout for every operation.
     pub fn uniform(d: Duration) -> Self {
         Timeouts {
@@ -87,7 +132,7 @@ pub(crate) struct Inner {
 
 impl Rbus {
     /// Connects to the broker at [`DEFAULT_SOCKET`] as `component`.
-    pub async fn connect(component: &str) -> Result<Rbus> {
+    pub async fn connect(component: impl Into<String>) -> Result<Rbus> {
         Rbus::builder(component).connect().await
     }
 
@@ -156,7 +201,7 @@ impl fmt::Debug for Rbus {
 
 /// Configures and opens a connection. Made by [`Rbus::builder`].
 #[derive(Debug, Clone)]
-#[must_use = "a builder does nothing until .connect().await"]
+#[must_use = "a builder does nothing until awaited"]
 pub struct RbusBuilder {
     component: String,
     socket: PathBuf,
@@ -231,7 +276,8 @@ impl RbusBuilder {
         self
     }
 
-    /// Connects and registers the component.
+    /// Connects and registers the component. Awaiting the builder does the
+    /// same.
     pub async fn connect(self) -> Result<Rbus> {
         check_component(&self.component)?;
         let options = Options {
@@ -246,5 +292,16 @@ impl RbusBuilder {
                 timeouts: self.timeouts,
             }),
         })
+    }
+}
+
+impl IntoFuture for RbusBuilder {
+    type Output = Result<Rbus>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Result<Rbus>> + Send>>;
+
+    /// [`RbusBuilder::connect`], so the builder awaits like the others:
+    /// `Rbus::builder("com.example.app").socket(path).await?`.
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.connect())
     }
 }

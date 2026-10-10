@@ -48,7 +48,8 @@ pub fn name(input: TokenStream) -> TokenStream {
 /// `#[rbus(skip)]`. Names are the field names in PascalCase.
 ///
 /// Struct options: `path = "Device.X."` (makes the struct a `Provider`),
-/// `on_subscribe = fn`, `on_commit = fn`, `serialized`.
+/// `on_subscribe = fn`, `on_commit = fn`, `serialized`, and
+/// `crate = "path"` when `rbus` is renamed in `Cargo.toml`.
 ///
 /// Field options: `name = "Name"`, `writable`, `validate = fn` (properties);
 /// `add_row`, `add_row = fn`, `remove_row`, `remove_row = fn` (tables);
@@ -68,7 +69,8 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// also derives `Row`. Names are the field names in PascalCase.
 ///
 /// Field options: `name = "Name"`, `writable`, `validate = fn` (values);
-/// `add_row[ = fn]`, `remove_row[ = fn]` (tables); `object`; `skip`.
+/// `add_row[ = fn]`, `remove_row[ = fn]` (tables); `object`; `skip`. The
+/// only struct option is `crate = "path"`, as for `Model`.
 #[proc_macro_derive(Row, attributes(rbus))]
 pub fn derive_row(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -82,8 +84,8 @@ pub fn derive_row(input: TokenStream) -> TokenStream {
 ///
 /// Function options: `get[ = "Name"]` and `poll = "2s"`, `set[ = "Name"]`,
 /// `method[ = "Name()"]`. Names default to the function name in PascalCase
-/// (without `set_` for setters). The impl block takes `serialized` next to
-/// `path`.
+/// (without `set_` for setters). The impl block takes `serialized` and
+/// `crate = "path"` (when `rbus` is renamed) next to `path`.
 #[proc_macro_attribute]
 pub fn provider(args: TokenStream, input: TokenStream) -> TokenStream {
     let item = parse_macro_input!(input as ItemImpl);
