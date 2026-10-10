@@ -33,6 +33,8 @@ use crate::convert::from_object;
 use crate::error::{Error, Result, Status, TypeError};
 use crate::name::{EventName, IntoName, Name, NameError, PropertyName, TablePath};
 use crate::queue::{Overflow, Popped, Queue};
+use crate::retry::Retry;
+use crate::table::RowId;
 use crate::types::RbusType;
 
 /// How long resubscription keeps retrying a provider that is still starting.
@@ -57,53 +59,10 @@ pub enum EventError {
     },
 }
 
-/// Retrying a subscription until its provider appears (E10). Only "no
-/// provider" is retried; any other error ends the attempt.
-///
-/// ```
-/// use std::time::Duration;
-/// let retry = rbus::Retry::exponential().max_elapsed(Duration::from_secs(60));
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Retry {
-    initial: Duration,
-    max_delay: Duration,
-    max_elapsed: Duration,
-}
-
-impl Retry {
-    /// C's schedule: 1 s, doubling, at most 60 s apart, giving up after 600 s
-    /// (`rbus.c:5096, 5155-5185`).
-    pub fn exponential() -> Retry {
-        Retry {
-            initial: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
-            max_elapsed: Duration::from_secs(600),
-        }
-    }
-
-    /// The first delay.
-    pub fn initial(mut self, d: Duration) -> Retry {
-        self.initial = d;
-        self
-    }
-
-    /// The longest delay between attempts.
-    pub fn max_delay(mut self, d: Duration) -> Retry {
-        self.max_delay = d;
-        self
-    }
-
-    /// Give up once this much time has passed.
-    pub fn max_elapsed(mut self, d: Duration) -> Retry {
-        self.max_elapsed = d;
-        self
-    }
-}
-
 /// A property's new value (E3), or its current value when the subscription
 /// asked for one (E9).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ValueChange<T> {
     /// The property that changed: the instance name for a wildcard subscription.
     pub name: String,
@@ -115,24 +74,9 @@ pub struct ValueChange<T> {
     pub by: Option<String>,
 }
 
-/// A table row, by instance number and alias.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RowId {
-    /// Instance number.
-    pub inst: u32,
-    /// Alias, if the row has one. Removal events don't carry it.
-    pub alias: Option<String>,
-}
-
-impl From<u32> for RowId {
-    /// A row without an alias.
-    fn from(inst: u32) -> Self {
-        RowId { inst, alias: None }
-    }
-}
-
 /// A row added to or removed from a table (E4).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RowEvent {
     /// A row was added.
     Added {
@@ -296,7 +240,7 @@ async fn subscribe_once(
         .wait(core.timeouts.subscribe, "subscribe")
         .await?;
     check_delivered(&frame, name)?;
-    let (mut body, _meta) = split_method_payload(&frame.payload)?;
+    let (mut body, _meta) = split_method_payload(&frame.payload, &core.limits)?;
     let resp = SubscribeResponse::decode_for(&mut body, initial)?;
     status_error(name, resp.status)?;
     Ok(resp)
@@ -310,7 +254,7 @@ async fn unsubscribe_once(core: &Arc<Core>, name: &str, id: i32) -> Result<()> {
     if frame.header.flags.contains(Flags::UNDELIVERABLE) {
         return Ok(());
     }
-    let (mut body, _meta) = split_method_payload(&frame.payload)?;
+    let (mut body, _meta) = split_method_payload(&frame.payload, &core.limits)?;
     status_error(name, StatusResponse::decode(&mut body)?.status)
 }
 
@@ -318,9 +262,7 @@ async fn unsubscribe_once(core: &Arc<Core>, name: &str, id: i32) -> Result<()> {
 /// replies, and forgets them (L13).
 pub(crate) fn unsubscribe_all(core: &Arc<Core>) {
     for (id, name) in core.sub_names() {
-        if let Some(sub) = core.remove_sub(id) {
-            sub.queue.close();
-        }
+        core.remove_sub(id);
         drop(start(core, Method::Unsubscribe, &name, id, false));
     }
 }
@@ -420,6 +362,18 @@ pub struct SubscribeBuilder<'a, I> {
     overflow: Overflow,
 }
 
+impl<I> std::fmt::Debug for SubscribeBuilder<'_, I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscribeBuilder")
+            .field("name", &self.name.as_ref().ok())
+            .field("initial_value", &self.initial)
+            .field("retry", &self.retry)
+            .field("buffer", &self.buffer)
+            .field("overflow", &self.overflow)
+            .finish()
+    }
+}
+
 impl<'a, I> SubscribeBuilder<'a, I> {
     fn new(bus: &'a Rbus, name: Result<Name, NameError>, decode: Decode<I>) -> Self {
         SubscribeBuilder {
@@ -440,7 +394,8 @@ impl<'a, I> SubscribeBuilder<'a, I> {
         self
     }
 
-    /// How many events to hold for a slow consumer (default 256).
+    /// How many events to hold for a slow consumer (default 256; at least
+    /// 1, so 0 means 1).
     pub fn buffer(mut self, events: usize) -> Self {
         self.buffer = events;
         self
@@ -514,7 +469,7 @@ impl<'a, I: Send + 'static> IntoFuture for SubscribeBuilder<'a, I> {
                     armed: true,
                 };
                 let started = tokio::time::Instant::now();
-                let mut delay = self.retry.map(|r| r.initial);
+                let mut delay = self.retry.map(|r| r.first_delay());
                 let resp = loop {
                     match subscribe_once(core, &name, id, self.initial).await {
                         Err(Error::NotFound(n)) => {
@@ -523,14 +478,14 @@ impl<'a, I: Send + 'static> IntoFuture for SubscribeBuilder<'a, I> {
                                 core.remove_sub(id);
                                 return Err(Error::NotFound(n));
                             };
-                            if started.elapsed() + d > retry.max_elapsed {
+                            if retry.gives_up(started.elapsed(), d) {
                                 guard.armed = false;
                                 core.remove_sub(id);
                                 return Err(Error::NotFound(n));
                             }
                             debug!(?d, "no provider yet; retrying");
                             tokio::time::sleep(d).await;
-                            delay = Some((d * 2).min(retry.max_delay));
+                            delay = Some(retry.next_delay(d));
                         }
                         other => break other?,
                     }
@@ -560,6 +515,7 @@ impl<'a, I: Send + 'static> IntoFuture for SubscribeBuilder<'a, I> {
 ///
 /// It implements [`Stream`]; [`Subscription::next`] works without importing
 /// a stream extension trait.
+#[must_use = "dropping a subscription unsubscribes"]
 pub struct Subscription<I> {
     bus: Rbus,
     id: i32,
@@ -595,7 +551,6 @@ impl<I> Subscription<I> {
     /// Unsubscribes and waits for the provider to confirm (E2).
     pub async fn unsubscribe(mut self) -> Result<()> {
         self.active = false;
-        self.queue.close();
         let core = &self.bus.inner.conn;
         core.remove_sub(self.id);
         unsubscribe_once(core, &self.name, self.id)
@@ -752,10 +707,5 @@ mod tests {
             error: TypeError::mismatch("u8", &Value::Bool(true)),
         };
         assert_eq!(e.to_string(), "event E!: expected u8, found bool");
-        let r = Retry::exponential()
-            .initial(Duration::from_millis(1))
-            .max_delay(Duration::from_millis(2))
-            .max_elapsed(Duration::from_millis(3));
-        assert_eq!(r.max_elapsed, Duration::from_millis(3));
     }
 }

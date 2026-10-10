@@ -40,6 +40,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # rbus without its default features (no macros).
+  no-default-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p rbus --no-default-features --lib -- -D warnings
+      - run: cargo test -p rbus --no-default-features --lib
+      - run: cargo test -p rbus --no-default-features --doc
+      - run: cargo doc -p rbus --no-deps --no-default-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # The published crates package and build from their tarballs. The
+  # workspace keeps publish = false until a release; this checkout flips it.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sed -i 's/^publish = false$/publish = true/' Cargo.toml
+      - run: cargo package --workspace --exclude rbus-testkit --allow-dirty
+
   msrv:
     runs-on: ubuntu-latest
     steps:

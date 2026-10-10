@@ -13,7 +13,6 @@ use tracing::{Instrument, debug_span};
 use crate::bus::Rbus;
 use crate::error::{Error, Result, Status};
 use crate::name::{IntoName, Name, NameError, TablePath};
-use crate::subscribe::RowId;
 
 /// A table on the bus. Made by [`Rbus::table`].
 ///
@@ -26,9 +25,25 @@ use crate::subscribe::RowId;
 /// # Ok(()) }
 /// ```
 #[derive(Debug, Clone)]
-pub struct Table {
+pub struct RemoteTable {
     bus: Rbus,
     path: Result<TablePath, NameError>,
+}
+
+/// A table row, by instance number and alias.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowId {
+    /// Instance number.
+    pub inst: u32,
+    /// Alias, if the row has one. Removal events don't carry it.
+    pub alias: Option<String>,
+}
+
+impl From<u32> for RowId {
+    /// A row without an alias.
+    fn from(inst: u32) -> Self {
+        RowId { inst, alias: None }
+    }
 }
 
 /// Which row to remove: an instance number or an alias.
@@ -38,6 +53,18 @@ pub enum RowRef {
     Inst(u32),
     /// By alias: `Table.[guest].`.
     Alias(String),
+}
+
+impl From<&str> for RowRef {
+    fn from(alias: &str) -> Self {
+        RowRef::Alias(alias.to_owned())
+    }
+}
+
+impl From<String> for RowRef {
+    fn from(alias: String) -> Self {
+        RowRef::Alias(alias)
+    }
 }
 
 impl From<u32> for RowRef {
@@ -73,15 +100,15 @@ fn check(status: i32, name: &str) -> Result<()> {
 impl Rbus {
     /// A handle on the table at `path` (ending in `.`). An invalid path is
     /// reported by the first operation.
-    pub fn table(&self, path: impl IntoName<TablePath>) -> Table {
-        Table {
+    pub fn table(&self, path: impl IntoName<TablePath>) -> RemoteTable {
+        RemoteTable {
             bus: self.clone(),
             path: path.into_name(),
         }
     }
 }
 
-impl Table {
+impl RemoteTable {
     fn path(&self) -> Result<&TablePath> {
         self.path.as_ref().map_err(|e| Error::Name(e.clone()))
     }
@@ -152,10 +179,11 @@ impl Table {
     }
 }
 
-/// A row being added; await it. Made by [`Table::add_row`].
+/// A row being added; await it. Made by [`RemoteTable::add_row`].
 #[must_use = "a row is added only when awaited"]
+#[derive(Debug)]
 pub struct AddRow<'a> {
-    table: &'a Table,
+    table: &'a RemoteTable,
     alias: Option<String>,
 }
 

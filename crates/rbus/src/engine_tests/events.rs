@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// The advisory route is registered once, before the first subscription.
-async fn expect_advisory_route(peer: &mut Peer) {
+pub(super) async fn expect_advisory_route(peer: &mut Peer) {
     let f = peer.recv().await;
     assert_eq!(f.header.topic, control::TOPIC_SUBSCRIBE);
     let route: Route = control::decode(&f.payload).unwrap();
@@ -32,14 +32,14 @@ async fn expect_advisory_route(peer: &mut Peer) {
     );
 }
 
-async fn reply_subscribe(peer: &mut Peer, req: &Frame, resp: SubscribeResponse) {
+pub(super) async fn reply_subscribe(peer: &mut Peer, req: &Frame, resp: SubscribeResponse) {
     let mut w = Writer::new();
     resp.encode(&mut w);
     let payload = w.finish_with_meta(|m| MethodMeta::response().encode(m));
     peer.reply(req, Flags::RAW_BINARY, payload).await;
 }
 
-fn subscribed(id: i32) -> SubscribeResponse {
+pub(super) fn subscribed(id: i32) -> SubscribeResponse {
     SubscribeResponse {
         status: 0,
         initial: InitialValue::NotRequested,
@@ -47,7 +47,7 @@ fn subscribed(id: i32) -> SubscribeResponse {
     }
 }
 
-fn event_frame(to: &str, routing: &str, ev: Event) -> Frame {
+pub(super) fn event_frame(to: &str, routing: &str, ev: Event) -> Frame {
     let meta = EventMeta {
         event_name: routing.into(),
         object_name: "Prov".into(),
@@ -60,7 +60,7 @@ fn event_frame(to: &str, routing: &str, ev: Event) -> Frame {
     Frame::new(Header::new(1, Flags::RAW_BINARY, to, "Prov"), payload)
 }
 
-fn event(name: &str, kind: EventKind, data: Object, component_id: i32) -> Event {
+pub(super) fn event(name: &str, kind: EventKind, data: Object, component_id: i32) -> Event {
     Event {
         name: name.into(),
         kind,
@@ -76,7 +76,8 @@ fn advisory_frame(event: i32, inbox: &str) -> Frame {
     let payload = control::encode(&control::Advisory {
         event,
         inbox: inbox.into(),
-    });
+    })
+    .unwrap();
     Frame::new(
         Header::new(1, Flags::NONE, control::TOPIC_ADVISORY, ""),
         payload,
@@ -338,6 +339,67 @@ async fn d12_a_slow_consumer_sees_lagged() {
     assert_eq!(sub.next().await.unwrap(), Err(EventError::Lagged(3)));
     let next = sub.next().await.unwrap().unwrap();
     assert_eq!(next.get("i"), Some(&Value::U8(3)));
+}
+
+#[tokio::test]
+async fn d12_dropping_a_full_block_subscription_frees_the_connection() {
+    let l = Listener::new();
+    let (bus, mut peer) = l.connect(short()).await;
+    let sub = tokio::spawn({
+        let bus = bus.clone();
+        async move {
+            bus.subscribe::<Object>("Device.E!")
+                .buffer(1)
+                .overflow(Overflow::Block)
+                .await
+        }
+    });
+    expect_advisory_route(&mut peer).await;
+    let req = peer.recv().await;
+    let id = request::<SubscribeRequest>(&req, Method::Subscribe)
+        .options
+        .unwrap()
+        .component_id;
+    reply_subscribe(&mut peer, &req, subscribed(1)).await;
+    let sub = sub.await.unwrap().unwrap();
+    // The second event fills the queue; the reader waits on the third.
+    for i in 0..3u8 {
+        peer.send(event_frame(
+            bus.inbox(),
+            "Device.E!",
+            event(
+                "Device.E!",
+                EventKind::General,
+                Object::new().with("i", i),
+                id,
+            ),
+        ))
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Dropping the subscription must release the reader, or no reply would
+    // ever be read again.
+    drop(sub);
+    let unsub = peer.recv().await;
+    let _: SubscribeRequest = request(&unsub, Method::Unsubscribe);
+    let get = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.get::<u32>("Device.A").await }
+    });
+    let req = peer.recv().await;
+    peer.reply_rbus(
+        &req,
+        &get_ok(vec![Property::new("Device.A", Value::U32(1))]),
+    )
+    .await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), get)
+            .await
+            .expect("the reader is stuck")
+            .unwrap()
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -629,6 +691,29 @@ async fn c3_c5_get_tree_fans_out_and_reports_failures() {
     assert_eq!(tree.failures().len(), 1);
     assert_eq!(tree.failures()[0].component, "compB");
     assert_eq!(tree.failures()[0].error.status(), Some(Status::BusError));
+
+    // An empty answer from one component still counts: the call succeeds
+    // with an empty tree and reports the other's failure.
+    let get = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.get_tree("Device.W.").await }
+    });
+    let q = peer.recv().await;
+    peer.reply_json(
+        &q,
+        &DiscoveryReply {
+            result: Some(0),
+            count: 2,
+            items: vec!["compA".into(), "compB".into()],
+        },
+    )
+    .await;
+    let a = peer.recv().await;
+    let b = peer.recv().await;
+    peer.reply_rbus(&a, &get_ok(vec![])).await;
+    peer.undeliverable(&b).await;
+    let tree = get.await.unwrap().unwrap();
+    assert_eq!((tree.iter().count(), tree.failures().len()), (0, 1));
 
     // Every component failing fails the call.
     let get = tokio::spawn({

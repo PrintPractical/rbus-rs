@@ -43,20 +43,26 @@ impl Listener {
     /// Connects a bus to this socket and returns both ends, with the two
     /// registration frames already consumed.
     async fn connect(&self, timeouts: Timeouts) -> (Rbus, Peer) {
-        let bus = Rbus::builder("test.component")
-            .socket(&self.path)
-            .timeouts(timeouts)
-            .connect()
+        self.connect_with(Rbus::builder("test.component").timeouts(timeouts))
             .await
-            .unwrap();
-        let (stream, _) = self.listener.accept().await.unwrap();
-        let mut peer = Peer {
-            stream,
-            decoder: FrameDecoder::new(),
-        };
+    }
+
+    /// [`Listener::connect`] with more builder options.
+    async fn connect_with(&self, builder: crate::RbusBuilder) -> (Rbus, Peer) {
+        let bus = builder.socket(&self.path).connect().await.unwrap();
+        let mut peer = self.accept().await;
         peer.recv().await;
         peer.recv().await;
         (bus, peer)
+    }
+
+    /// The broker's end of the next connection.
+    async fn accept(&self) -> Peer {
+        let (stream, _) = self.listener.accept().await.unwrap();
+        Peer {
+            stream,
+            decoder: FrameDecoder::new(),
+        }
     }
 }
 
@@ -120,7 +126,8 @@ impl Peer {
     }
 
     async fn reply_json<T: Serialize>(&mut self, req: &Frame, msg: &T) {
-        self.reply(req, Flags::NONE, control::encode(msg)).await;
+        self.reply(req, Flags::NONE, control::encode(msg).unwrap())
+            .await;
     }
 
     async fn undeliverable(&mut self, req: &Frame) {
@@ -131,7 +138,8 @@ impl Peer {
 
 fn request<B: Body>(frame: &Frame, method: Method) -> B {
     assert_eq!(frame.header.flags, Flags::REQUEST | Flags::RAW_BINARY);
-    let (mut body, meta) = split_method_payload(&frame.payload).unwrap();
+    let (mut body, meta) =
+        split_method_payload(&frame.payload, &rbus_wire::Limits::DEFAULT).unwrap();
     assert_eq!(meta.method, method);
     B::decode(&mut body).unwrap()
 }
@@ -195,6 +203,11 @@ async fn connect_errors() {
         .connect()
         .await;
     assert!(matches!(missing, Err(Error::Io(_))));
+    // The builder awaits directly, like the other builders.
+    let awaited = Rbus::builder(String::from("c"))
+        .socket("/nonexistent/rtrouted")
+        .await;
+    assert!(matches!(awaited, Err(Error::Io(_))));
     let bad = Rbus::builder("bad name").connect().await;
     assert!(matches!(bad, Err(Error::Name(e)) if e.kind == "component"));
 }
@@ -347,6 +360,62 @@ async fn l6_timeout_and_cancellation_leave_no_state() {
     )
     .await;
     assert_eq!(get.await.unwrap().unwrap(), -1);
+}
+
+#[tokio::test]
+async fn limits_apply_to_what_peers_send() {
+    let l = Listener::new();
+    let limits = crate::Limits::default()
+        .with_max_depth(4)
+        .with_max_payload(4096);
+    let (bus, mut peer) = l
+        .connect_with(
+            Rbus::builder("test.component")
+                .timeouts(short())
+                .limits(limits),
+        )
+        .await;
+
+    // A reply nested deeper than allowed fails the call, not the connection.
+    let mut deep = Object::new();
+    for _ in 0..10 {
+        let mut outer = Object::new();
+        outer.children.push(deep);
+        deep = outer;
+    }
+    let get = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.get::<Value>("Device.A").await }
+    });
+    let req = peer.recv().await;
+    peer.reply_rbus(
+        &req,
+        &get_ok(vec![Property::new("Device.A", Value::Object(deep))]),
+    )
+    .await;
+    let got = get.await.unwrap();
+    assert!(
+        matches!(
+            got,
+            Err(Error::Wire(rbus_wire::Error::LimitExceeded {
+                what: "nesting depth",
+                max: 4
+            }))
+        ),
+        "{got:?}"
+    );
+    assert_eq!(*bus.state().borrow(), ConnectionState::Connected);
+
+    // A frame over the payload limit can't be skipped: the socket goes.
+    peer.send(Frame::new(
+        Header::new(1, Flags::RAW_BINARY, bus.inbox(), "x"),
+        vec![0u8; 5000],
+    ))
+    .await;
+    bus.state()
+        .wait_for(|s| *s == ConnectionState::Closed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -828,3 +897,4 @@ async fn m1_m3_invoke() {
 
 mod events;
 mod provider;
+mod reconnect;

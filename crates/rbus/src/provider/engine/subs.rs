@@ -99,7 +99,7 @@ fn refused(status: Status) -> Vec<u8> {
 
 /// A context for reads the engine makes itself (baselines, polls).
 fn internal_cx(out: &dyn Outbox) -> Context {
-    Context::new(
+    Context::traced(
         Some(out.component().to_owned()),
         String::new(),
         Span::none(),
@@ -131,31 +131,75 @@ impl State {
         Ok((kind, node.owner))
     }
 
-    fn mount(&self, id: MountId) -> Option<&Mount> {
+    /// The handler of the provider that owns a found property.
+    fn handler_of(&self, found: &Found) -> Option<Handler> {
+        self.handler(self.model.tree.node(found.node).owner)
+    }
+
+    pub(super) fn mount(&self, id: MountId) -> Option<&Mount> {
         self.mounts.iter().find(|(m, _)| *m == id).map(|(_, m)| m)
     }
 
-    /// Tells the mount's listeners and store about a change.
+    fn mount_mut(&mut self, id: MountId) -> Option<&mut Mount> {
+        self.mounts
+            .iter_mut()
+            .find(|(m, _)| *m == id)
+            .map(|(_, m)| m)
+    }
+
+    /// Tells the mount's listeners about a change, and marks its store for
+    /// saving once the lock is released ([`Registry::flush_saves`]): the
+    /// store is the user's code, which may block or call back in.
     fn changed(&mut self, mount: Option<MountId>, event: SubscriptionEvent) {
         let Some(id) = mount else { return };
-        let subscribers: Vec<SubscriberInfo> = self
+        if let Some(m) = self.mount_mut(id) {
+            m.listeners.retain(|w| w.strong_count() > 0);
+            for q in m.listeners.iter().filter_map(Weak::upgrade) {
+                q.push_now(event.clone());
+            }
+            if !self.unsaved.contains(&id) {
+                self.unsaved.push(id);
+            }
+        }
+    }
+
+    /// A mount's store and its current subscribers.
+    pub(super) fn snapshot(
+        &self,
+        id: MountId,
+    ) -> Option<(Arc<dyn SubscriberStore>, Vec<SubscriberInfo>)> {
+        let m = self.mount(id)?;
+        let subscribers = self
             .subs
             .iter()
             .filter(|s| s.mount == Some(id))
             .map(|s| s.info.clone())
             .collect();
-        if let Some(m) = self
-            .mounts
-            .iter_mut()
-            .find(|(m, _)| *m == id)
-            .map(|(_, m)| m)
-        {
-            m.listeners.retain(|w| w.strong_count() > 0);
-            for q in m.listeners.iter().filter_map(Weak::upgrade) {
-                q.push_now(event.clone());
-            }
-            m.store.save(&subscribers);
-        }
+        Some((m.store.clone(), subscribers))
+    }
+
+    /// Removes a row with everything under it, publishes `OBJECT_DELETED`,
+    /// and drops the exact subscriptions to anything in it, as C does
+    /// (`rbus_subscriptions.c:308-390`). Patterns stay: later rows may
+    /// match them.
+    pub(super) fn remove_row(&mut self, out: &dyn Outbox, table: &str, inst: u32) -> Option<RowId> {
+        let prefix = format!("{table}{inst}.");
+        // Resolved before the row goes, while its alias still resolves.
+        let doomed: Vec<u32> = self
+            .subs
+            .iter()
+            .filter(|s| !s.info.event.contains('*') && !s.info.event.contains("{i}"))
+            .filter(|s| {
+                self.model
+                    .resolve(&s.info.event)
+                    .is_ok_and(|r| r.canonical.starts_with(&prefix))
+            })
+            .map(|s| s.info.id)
+            .collect();
+        let row = self.model.remove_row(table, inst)?;
+        self.row_event(out, table, &row, false);
+        self.remove_subs(|s| doomed.contains(&s.info.id));
+        Some(row)
     }
 
     /// Removes the subscriptions `remove` picks, telling everyone, and drops
@@ -359,7 +403,6 @@ impl Registry {
             };
         }
         if let Some(handler) = &handler {
-            let _guard = handler.lock().await;
             if let Err(fault) = handler.provider.on_subscribe(&cx, &info).await {
                 debug!(event = %info.event, %fault, "subscription refused by the provider");
                 return refused(Status::from_wire(wire_status(fault.status())));
@@ -375,16 +418,12 @@ impl Registry {
                     .into_iter()
                     .filter(|f| !state.values.contains_key(&f.name))
                     .filter_map(|f| {
-                        let h = state.handler(state.model.tree.node(f.node).owner)?;
+                        let h = state.handler_of(&f)?;
                         Some((f, h))
                     })
                     .collect()
             };
-            for (found, handler) in missing {
-                if let Some(v) = self.read(&handler, &found, internal_cx(out)).await {
-                    self.state().values.entry(found.name).or_insert(v);
-                }
-            }
+            self.record_baselines(out, missing).await;
         }
         let info = {
             let mut state = self.state();
@@ -423,7 +462,6 @@ impl Registry {
     async fn read(&self, handler: &Handler, found: &Found, cx: Context) -> Option<Value> {
         let name: PropertyName = name_of(&found.name).ok()?;
         let cx = cx.with_instances(found.instances.clone());
-        let _guard = handler.lock().await;
         handler.provider.get(&cx, &name).await.ok()
     }
 
@@ -448,7 +486,7 @@ impl Registry {
                 found
                     .into_iter()
                     .map(|f| {
-                        let h = state.handler(state.model.tree.node(f.node).owner);
+                        let h = state.handler_of(&f);
                         (f, h)
                     })
                     .collect()
@@ -486,7 +524,7 @@ impl Registry {
             let read = {
                 let state = self.state();
                 state.covered(name).into_iter().next().and_then(|f| {
-                    let h = state.handler(state.model.tree.node(f.node).owner)?;
+                    let h = state.handler_of(&f)?;
                     Some((f, h))
                 })
             };
@@ -514,7 +552,12 @@ impl Registry {
 
     /// A client left the bus: drop its subscriptions (`rbusSubscriptions_handleClientDisconnect`).
     pub(crate) fn client_gone(&self, inbox: &str) {
-        let n = self.state().remove_subs(|s| s.info.inbox == inbox);
+        let n = {
+            let mut state = self.state();
+            // Its uncommitted sets can never be committed now.
+            state.sessions.retain(|(caller, _), _| caller != inbox);
+            state.remove_subs(|s| s.info.inbox == inbox)
+        };
         if n > 0 {
             debug!(inbox, subscriptions = n, "subscriber disconnected");
         }
@@ -522,27 +565,45 @@ impl Registry {
 
     /// Restores the subscribers a store kept, skipping those whose process
     /// is gone (`rbusSubscriptions_loadCache`).
-    pub(crate) fn restore(&self, id: MountId, out: &dyn Outbox) {
+    ///
+    /// Returns true if it restored any, so the caller starts the poller
+    /// that value changes need.
+    pub(crate) fn restore(&self, id: MountId, out: &dyn Outbox) -> bool {
         let Some(store) = self.state().mount(id).map(|m| m.store.clone()) else {
-            return;
+            return false;
         };
+        // Outside the lock: the store is the user's code.
+        let loaded = store.load();
         let mut restored = 0;
-        for info in store.load() {
+        for info in loaded {
             let mut state = self.state();
-            if !listener_running(&info.inbox) || state.subs.iter().any(|s| s.info == info) {
+            // The D35 key: a consumer may have subscribed again already.
+            let same = |s: &Sub| {
+                s.info.inbox == info.inbox
+                    && s.info.component_id == info.component_id
+                    && s.info.event == info.event
+                    && s.info.filter == info.filter
+            };
+            if !listener_running(&info.inbox) || state.subs.iter().any(same) {
                 continue;
             }
             let Ok((kind, mount)) = state.plan_subscription(&info.event) else {
                 continue;
             };
             state.next_sub_id = state.next_sub_id.max(3).max(info.id + 1);
-            state.subs.push(Sub { info, kind, mount });
+            state.subs.push(Sub {
+                info: info.clone(),
+                kind,
+                mount,
+            });
+            state.changed(mount, SubscriptionEvent::Added(info));
             restored += 1;
         }
         if restored > 0 {
             debug!(restored, "subscribers restored");
             out.watch_disconnects();
         }
+        restored > 0
     }
 
     /// Subscriptions a provider's elements have. With a name, only those
@@ -573,8 +634,8 @@ impl Registry {
     /// A stream of a provider's subscription changes (P8).
     pub(crate) fn listen(&self, id: MountId) -> SubscriptionEvents {
         let queue = Arc::new(Queue::new(SUBSCRIPTION_EVENT_BUFFER, Overflow::DropOldest));
-        match self.state().mounts.iter_mut().find(|(m, _)| *m == id) {
-            Some((_, m)) => m.listeners.push(Arc::downgrade(&queue)),
+        match self.state().mount_mut(id) {
+            Some(m) => m.listeners.push(Arc::downgrade(&queue)),
             None => queue.close(),
         }
         SubscriptionEvents { queue }
@@ -683,7 +744,7 @@ impl Registry {
     /// Before a set: records the current value of each watched parameter
     /// that has no record yet, so the change can be reported.
     pub(super) async fn before_set(&self, out: &dyn Outbox, handler: &Handler, changes: &[Change]) {
-        let missing: Vec<Found> = {
+        let missing: Vec<(Found, Handler)> = {
             let state = self.state();
             changes
                 .iter()
@@ -696,16 +757,25 @@ impl Registry {
                         return None;
                     };
                     matches!(state.model.tree.node(n).kind, NodeKind::Property(a) if a.readable())
-                        .then(|| Found {
-                            name: r.canonical,
-                            node: n,
-                            instances: r.instances,
+                        .then(|| {
+                            let found = Found {
+                                name: r.canonical,
+                                node: n,
+                                instances: r.instances,
+                            };
+                            (found, handler.clone())
                         })
                 })
                 .collect()
         };
-        for found in missing {
-            if let Some(v) = self.read(handler, &found, internal_cx(out)).await {
+        self.record_baselines(out, missing).await;
+    }
+
+    /// Reads each property, outside the lock, and records its value as the
+    /// one subscribers last saw, unless something recorded one meanwhile.
+    async fn record_baselines(&self, out: &dyn Outbox, reads: Vec<(Found, Handler)>) {
+        for (found, handler) in reads {
+            if let Some(v) = self.read(&handler, &found, internal_cx(out)).await {
                 self.state().values.entry(found.name).or_insert(v);
             }
         }
@@ -762,7 +832,7 @@ impl Registry {
                     .or_insert(now + every);
                 if now >= *next {
                     *next = now + every;
-                    if let Some(h) = state.handler(state.model.tree.node(found.node).owner) {
+                    if let Some(h) = state.handler_of(&found) {
                         due.push((found, h));
                     }
                 }

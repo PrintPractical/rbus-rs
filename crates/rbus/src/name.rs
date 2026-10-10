@@ -27,6 +27,7 @@
 //! while compiling and picks the type from its suffix:
 //!
 //! ```
+//! # #[cfg(feature = "macros")] mod example {
 //! # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
 //! use rbus::{MethodName, PropertyName, name};
 //!
@@ -35,6 +36,7 @@
 //! bus.invoke::<_, ()>(REBOOT, ()).await?;
 //! # let _ = ENABLE;
 //! # Ok(()) }
+//! # }
 //! ```
 //!
 //! A name of the wrong kind doesn't compile:
@@ -56,6 +58,7 @@ pub const MAX_NAME_LEN: usize = 255;
 /// A name that is not valid for the kind of element it names.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid {kind} name {name:?}: {reason}")]
+#[non_exhaustive]
 pub struct NameError {
     /// The rejected name.
     pub name: String,
@@ -146,18 +149,12 @@ const fn check(b: &[u8], kind: Kind) -> Result<(), &'static str> {
     }
 }
 
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// Implemented by the name types. Sealed: the set of kinds is fixed.
-pub trait ElementName:
-    sealed::Sealed + Clone + fmt::Debug + fmt::Display + AsRef<str> + Into<Name>
+/// Implemented by the name types, for code generic over the kind.
+pub(crate) trait ElementName:
+    Clone + fmt::Debug + fmt::Display + AsRef<str> + Into<Name>
 {
     /// Validates `name` as this kind.
     fn parse(name: impl Into<Cow<'static, str>>) -> Result<Self, NameError>;
-    /// The name as text.
-    fn as_str(&self) -> &str;
 }
 
 /// Anything an API accepts as a name of kind `N`: the typed name itself, or a
@@ -202,14 +199,9 @@ macro_rules! name_type {
             }
         }
 
-        impl sealed::Sealed for $ty {}
-
         impl ElementName for $ty {
             fn parse(name: impl Into<Cow<'static, str>>) -> Result<Self, NameError> {
                 $ty::parse(name)
-            }
-            fn as_str(&self) -> &str {
-                &self.0
             }
         }
 
@@ -306,7 +298,31 @@ macro_rules! name_type {
                 $ty::parse(self.clone())
             }
         }
+
+        impl IntoName<$ty> for &&str {
+            fn into_name(self) -> Result<$ty, NameError> {
+                $ty::parse((*self).to_owned())
+            }
+        }
     };
+}
+
+/// A typed name works wherever any name does: a partial-path get, a
+/// discovery query.
+macro_rules! typed_into_name {
+    ($($ty:ident),*) => {$(
+        impl IntoName<Name> for $ty {
+            fn into_name(self) -> Result<Name, NameError> {
+                Ok(self.into())
+            }
+        }
+
+        impl IntoName<Name> for &$ty {
+            fn into_name(self) -> Result<Name, NameError> {
+                Ok(self.clone().into())
+            }
+        }
+    )*};
 }
 
 name_type!(
@@ -340,6 +356,8 @@ name_type!(
     TablePath,
     Kind::Table
 );
+
+typed_into_name!(PropertyName, MethodName, EventName, TablePath);
 
 macro_rules! into_any_name {
     ($($ty:ident),*) => {$(
@@ -444,8 +462,15 @@ mod tests {
         assert!(p == "Device.A");
         assert!(p == *"Device.A");
         assert_eq!(p.as_ref() as &str, "Device.A");
-        assert_eq!(ElementName::as_str(&p), "Device.A");
         assert_eq!(<PropertyName as ElementName>::parse("Device.A").unwrap(), p);
+        // A typed name is also any name, and `&&str` works like `&str`.
+        let any: Name = (&p).into_name().unwrap();
+        assert_eq!(any, "Device.A");
+        let any: Name = TablePath::from_static("Device.T.").into_name().unwrap();
+        assert_eq!(any, "Device.T.");
+        let s = "Device.A";
+        let typed: PropertyName = (&s).into_name().unwrap();
+        assert_eq!(typed, p);
         let s = String::from("Device.A");
         for n in [
             IntoName::<PropertyName>::into_name("Device.A").unwrap(),

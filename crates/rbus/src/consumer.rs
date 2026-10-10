@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use indexmap::IndexMap;
+use rbus_wire::Limits;
 use rbus_wire::body::{GetRequest, GetResponse, RpcRequest, RpcResponse, SetRequest, SetResponse};
 use rbus_wire::frame::{Flags, Frame};
 use rbus_wire::message::{Body, Method, TraceContext, request_payload, split_method_payload};
@@ -23,11 +24,11 @@ use crate::types::{IntoValue, RbusType};
 pub type Values = IndexMap<PropertyName, Value>;
 
 /// Decodes an rbus response, or reports why there is none.
-fn response<B: Body>(frame: &Frame, name: impl FnOnce() -> Name) -> Result<B> {
+fn response<B: Body>(frame: &Frame, limits: &Limits, name: impl FnOnce() -> Name) -> Result<B> {
     if frame.header.flags.contains(Flags::UNDELIVERABLE) {
         return Err(Error::NotFound(name()));
     }
-    let (mut body, _meta) = split_method_payload(&frame.payload)?;
+    let (mut body, _meta) = split_method_payload(&frame.payload, limits)?;
     Ok(B::decode(&mut body)?)
 }
 
@@ -62,9 +63,10 @@ impl Rbus {
     ) -> Result<impl Future<Output = Result<B>> + Send + use<B, Q>> {
         let payload = request_payload(method, Self::trace(), body);
         let pending = self.inner.conn.rbus_request(topic, payload)?;
+        let limits = self.inner.conn.limits;
         Ok(async move {
             let frame = pending.wait(timeout, op).await?;
-            response(&frame, || name)
+            response(&frame, &limits, || name)
         })
     }
 
@@ -382,6 +384,17 @@ impl Rbus {
 pub struct SetMany<'a> {
     bus: &'a Rbus,
     props: Result<Vec<(PropertyName, Value)>>,
+}
+
+impl std::fmt::Debug for SetMany<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Option<Vec<&str>> = self
+            .props
+            .as_ref()
+            .ok()
+            .map(|p| p.iter().map(|(n, _)| n.as_str()).collect());
+        f.debug_struct("SetMany").field("names", &names).finish()
+    }
 }
 
 impl SetMany<'_> {

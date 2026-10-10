@@ -14,8 +14,16 @@ start_broker() {
 }
 
 stop_broker() {
+    # A broker-restart test may have replaced the one started here.
     kill "${broker_pid:-}" 2>/dev/null || true
+    pkill -x rtrouted 2>/dev/null || true
 }
+
+# Tests named *broker_restart* restart rtrouted, which drops every client, so
+# they are skipped in the main pass and run afterwards, one at a time (L5).
+restart_filter=broker_restart
+main_args=(--include-ignored --skip "$restart_filter")
+restart_args=(--include-ignored --test-threads=1 "$restart_filter")
 
 mode="${1:-test}"
 case "$mode" in
@@ -24,14 +32,16 @@ case "$mode" in
         ;;
     test)
         start_broker; trap stop_broker EXIT
-        cargo test --workspace --all-features -- --include-ignored
+        cargo test --workspace --all-features -- "${main_args[@]}"
+        RBUS_BROKER_RESTART=1 cargo test -p rbus --all-features --test reconnect -- "${restart_args[@]}"
         ;;
     coverage)
         start_broker; trap stop_broker EXIT
         # rbus-testkit is test tooling and rbus-macros runs inside the compiler;
         # the coverage gate covers rbus-wire and rbus.
         ignore='crates/rbus-(testkit|macros)/'
-        cargo llvm-cov --workspace --all-features --no-report -- --include-ignored
+        cargo llvm-cov --workspace --all-features --no-report -- "${main_args[@]}"
+        RBUS_BROKER_RESTART=1 cargo llvm-cov -p rbus --all-features --no-report --test reconnect -- "${restart_args[@]}"
         cargo llvm-cov report --ignore-filename-regex "$ignore" --lcov --output-path "$CARGO_TARGET_DIR/lcov.info"
         gate=()
         [[ -n "${COVERAGE_FAIL_UNDER:-}" ]] && gate=(--fail-under-lines "$COVERAGE_FAIL_UNDER")

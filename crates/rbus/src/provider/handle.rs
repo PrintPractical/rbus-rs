@@ -5,10 +5,11 @@ use std::sync::{Arc, Weak};
 
 use crate::conn::Core;
 use crate::error::{Error, Result, Status};
-use crate::name::{IntoName, Name, TablePath};
+use crate::name::{IntoName, Name, PropertyName, TablePath};
 use crate::provider::events::{SubscriberInfo, SubscriptionEvents};
 use crate::provider::model::MountId;
-use crate::subscribe::RowId;
+use crate::table::RowId;
+use crate::table::RowRef;
 use crate::types::IntoValue;
 
 /// What a registered provider uses to publish events and manage its rows
@@ -18,8 +19,8 @@ use crate::types::IntoValue;
 /// provider when it is registered; [`Provided::handle`](crate::provider::Provided::handle)
 /// returns another. It is cheap to clone. It doesn't keep the connection or
 /// the provider alive: once the provider is dropped, every call fails with
-/// [`Status::ElementDoesNotExist`] (or [`Error::Disconnected`] once the
-/// connection is gone), and `publish` calls do nothing.
+/// [`Status::ElementDoesNotExist`], or with [`Error::Disconnected`] once the
+/// connection is gone.
 #[derive(Clone)]
 pub struct Handle {
     core: Weak<Core>,
@@ -49,12 +50,20 @@ impl Handle {
     /// Fails with [`Status::ElementDoesNotExist`] unless `event` is an event
     /// of this provider's schema (rows included), and with
     /// [`Error::Type`] if `data` isn't an object.
-    pub fn publish<T: serde::Serialize + ?Sized>(&self, event: &str, data: &T) -> Result<()> {
+    ///
+    /// The name is any [`Name`], not only an [`EventName`](crate::EventName):
+    /// C registers some events without the `!` (`EventsTable.{i}.Event`).
+    pub fn publish<T: serde::Serialize + ?Sized>(
+        &self,
+        event: impl IntoName<Name>,
+        data: &T,
+    ) -> Result<()> {
+        let event = event.into_name()?;
         let data = crate::convert::to_object(data)?;
         let core = self.core()?;
         core.registry
-            .publish_event(self.id, &*core, event, data)
-            .map_err(|s| element_error(event, s))
+            .publish_event(self.id, &*core, &event, data)
+            .map_err(|s| element_error(&event, s))
     }
 
     /// Publishes a change of a property's value that the provider made
@@ -63,32 +72,34 @@ impl Handle {
     /// equal or nobody is subscribed.
     pub fn publish_value_change(
         &self,
-        property: &str,
+        property: impl IntoName<PropertyName>,
         old: impl IntoValue,
         new: impl IntoValue,
     ) -> Result<()> {
+        let property = property.into_name()?;
         let core = self.core()?;
         core.registry
             .publish_change(
                 self.id,
                 &*core,
-                property,
+                &property,
                 old.into_value(),
                 new.into_value(),
             )
-            .map_err(|s| element_error(property, s))
+            .map_err(|s| element_error(&property, s))
     }
 
     /// Reads a property through [`Provider::get`](crate::provider::Provider::get)
     /// and, if its value differs from the last one its subscribers saw,
     /// publishes the change. Use it when the provider knows a value changed
     /// but not the old value.
-    pub async fn notify_changed(&self, property: &str) -> Result<()> {
+    pub async fn notify_changed(&self, property: impl IntoName<PropertyName>) -> Result<()> {
+        let property = property.into_name()?;
         let core = self.core()?;
         core.registry
-            .notify_changed(self.id, &*core, property)
+            .notify_changed(self.id, &*core, &property)
             .await
-            .map_err(|s| element_error(property, s))
+            .map_err(|s| element_error(&property, s))
     }
 
     /// Adds a row the provider owns to one of its tables (PT3) and publishes
@@ -111,17 +122,34 @@ impl Handle {
             })
     }
 
-    /// Removes a row, and every row of the tables inside it, and publishes
-    /// `OBJECT_DELETED`.
-    pub fn remove_row(&self, table: impl IntoName<TablePath>, inst: u32) -> Result<()> {
+    /// Removes a row, by instance number or alias, and every row of the
+    /// tables inside it, and publishes `OBJECT_DELETED`.
+    pub fn remove_row(
+        &self,
+        table: impl IntoName<TablePath>,
+        row: impl Into<RowRef>,
+    ) -> Result<()> {
         let table = table.into_name()?;
         let core = self.core()?;
+        let fail = |status| Error::Status {
+            name: table.clone().into(),
+            status,
+        };
+        let inst = match row.into() {
+            RowRef::Inst(inst) => inst,
+            RowRef::Alias(alias) => {
+                core.registry
+                    .rows(&table)
+                    .map_err(fail)?
+                    .into_iter()
+                    .find(|r| r.alias.as_deref() == Some(alias.as_str()))
+                    .ok_or_else(|| fail(Status::ElementDoesNotExist))?
+                    .inst
+            }
+        };
         core.registry
             .remove_local_row(self.id, &table, inst, &*core)
-            .map_err(|status| Error::Status {
-                name: table.into(),
-                status,
-            })
+            .map_err(fail)
     }
 
     /// The rows of a table, in the order they were added.

@@ -15,6 +15,7 @@ use std::fmt;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
+use crate::limits::Limits;
 
 /// Start and end marker of every header.
 pub const MARKER: u16 = 0xAAAA;
@@ -26,8 +27,6 @@ pub const FIXED_HEADER_LEN: usize = 32;
 pub const FIXED_HEADER_LEN_ROUNDTRIP: usize = 72;
 /// Topics and reply topics must be shorter than this (rtMessageHeader.c).
 pub const MAX_TOPIC_LEN: usize = 256;
-/// Default limit for payloads accepted by [`FrameDecoder`].
-pub const DEFAULT_MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 
 const PREAMBLE_LEN: usize = 6;
 
@@ -178,23 +177,33 @@ impl Header {
             return Err(Error::BadMarker { found: marker });
         }
         let mut pos = 22;
-        let string = |pos: &mut usize| -> Result<String> {
+        // Returns the string and its length on the wire. A topic that isn't
+        // UTF-8 is kept lossily: it matches no route, so nothing answers it.
+        let string = |pos: &mut usize| -> Result<(String, usize)> {
             let len_end = *pos + 4;
             if len_end > header_len - 2 {
                 return Err(Error::BadHeaderLength(header_len));
             }
             let len = be_u32(b, *pos) as usize;
+            if len >= MAX_TOPIC_LEN {
+                return Err(Error::TopicTooLong(len));
+            }
             let end = len_end
                 .checked_add(len)
                 .filter(|&e| e <= header_len - 2)
                 .ok_or(Error::BadHeaderLength(header_len))?;
             let s = String::from_utf8_lossy(&b[len_end..end]).into_owned();
             *pos = end;
-            Ok(s)
+            Ok((s, len))
         };
-        let topic = string(&mut pos)?;
-        let reply_topic = string(&mut pos)?;
-        let roundtrip = match header_len - topic.len() - reply_topic.len() {
+        let (topic, topic_len) = string(&mut pos)?;
+        let (reply_topic, reply_len) = string(&mut pos)?;
+        // The fixed part, from the lengths on the wire: lossy decoding can
+        // make the strings longer than their bytes.
+        let fixed = header_len
+            .checked_sub(topic_len + reply_len)
+            .ok_or(Error::BadHeaderLength(header_len))?;
+        let roundtrip = match fixed {
             FIXED_HEADER_LEN => None,
             FIXED_HEADER_LEN_ROUNDTRIP => {
                 let mut ts = [0u64; 5];
@@ -293,16 +302,17 @@ impl Default for FrameDecoder {
 }
 
 impl FrameDecoder {
-    /// A decoder with [`DEFAULT_MAX_PAYLOAD`].
+    /// A decoder with the default [`Limits`].
     pub fn new() -> Self {
-        Self::with_max_payload(DEFAULT_MAX_PAYLOAD)
+        Self::with_limits(&Limits::DEFAULT)
     }
 
-    /// A decoder that rejects payloads larger than `max_payload` bytes.
-    pub fn with_max_payload(max_payload: usize) -> Self {
+    /// A decoder that rejects payloads larger than
+    /// [`Limits::max_payload`].
+    pub fn with_limits(limits: &Limits) -> Self {
         FrameDecoder {
             buf: BytesMut::new(),
-            max_payload,
+            max_payload: limits.max_payload,
         }
     }
 
@@ -494,7 +504,7 @@ mod tests {
     #[test]
     fn decoder_enforces_payload_limit_and_waits_for_data() {
         let bytes = sample().encode().unwrap();
-        let mut dec = FrameDecoder::with_max_payload(3);
+        let mut dec = FrameDecoder::with_limits(&Limits::default().with_max_payload(3));
         dec.push(&bytes);
         assert!(matches!(
             dec.next_frame(),

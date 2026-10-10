@@ -5,7 +5,7 @@ use tracing::Span;
 
 use crate::name::PropertyName;
 use crate::provider::fault::{Fault, SetFault};
-use crate::types::RbusType;
+use crate::types::{IntoValue, RbusType};
 
 /// Checks that `instances` has exactly `N` entries.
 fn exactly<const N: usize>(instances: &[u32]) -> Result<[u32; N], Fault> {
@@ -43,7 +43,20 @@ pub struct Context {
 }
 
 impl Context {
-    pub(crate) fn new(caller: Option<String>, inbox: String, span: Span) -> Self {
+    /// A context as the engine would make it, for unit-testing a provider
+    /// without a bus.
+    ///
+    /// ```
+    /// use rbus::provider::Context;
+    ///
+    /// let cx = Context::new(Some("com.example.ui"), "rbus.ui.INBOX.42").with_instances(vec![3]);
+    /// assert_eq!(cx.instances().unwrap(), [3]);
+    /// ```
+    pub fn new(caller: Option<&str>, inbox: &str) -> Self {
+        Context::traced(caller.map(str::to_owned), inbox.to_owned(), Span::none())
+    }
+
+    pub(crate) fn traced(caller: Option<String>, inbox: String, span: Span) -> Self {
         Context {
             caller,
             inbox,
@@ -52,7 +65,9 @@ impl Context {
         }
     }
 
-    pub(crate) fn with_instances(&self, instances: Vec<u32>) -> Self {
+    /// The same context with the instance numbers of the rows on the way
+    /// to the element, outermost first.
+    pub fn with_instances(&self, instances: Vec<u32>) -> Self {
         Context {
             instances,
             ..self.clone()
@@ -94,6 +109,21 @@ pub struct Change {
 }
 
 impl Change {
+    /// A change, for unit-testing a provider without a bus.
+    pub fn new(name: PropertyName, value: impl IntoValue) -> Self {
+        Change {
+            name,
+            value: value.into_value(),
+            instances: Vec::new(),
+        }
+    }
+
+    /// The same change with the instance numbers of the rows on the way.
+    pub fn with_instances(mut self, instances: Vec<u32>) -> Self {
+        self.instances = instances;
+        self
+    }
+
     /// The parameter, with aliases resolved to instance numbers.
     pub fn name(&self) -> &PropertyName {
         &self.name
@@ -144,6 +174,19 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    /// A transaction, for unit-testing a provider without a bus.
+    ///
+    /// ```
+    /// use rbus::provider::{Change, Transaction};
+    ///
+    /// let name = rbus::PropertyName::from_static("Device.A");
+    /// let tx: Transaction = [Change::new(name, 1u32)].into_iter().collect();
+    /// assert_eq!(tx.len(), 1);
+    /// ```
+    pub fn new(changes: Vec<Change>) -> Self {
+        Transaction { changes }
+    }
+
     /// The changes, in the order the consumer sent them.
     pub fn changes(&self) -> &[Change] {
         &self.changes
@@ -170,6 +213,12 @@ impl Transaction {
     }
 }
 
+impl FromIterator<Change> for Transaction {
+    fn from_iter<I: IntoIterator<Item = Change>>(changes: I) -> Self {
+        Transaction::new(changes.into_iter().collect())
+    }
+}
+
 impl IntoIterator for Transaction {
     type Item = Change;
     type IntoIter = std::vec::IntoIter<Change>;
@@ -193,7 +242,7 @@ mod tests {
 
     #[test]
     fn instances_are_counted() {
-        let cx = Context::new(Some("c".into()), "rbus.c.INBOX.1".into(), Span::none())
+        let cx = Context::traced(Some("c".into()), "rbus.c.INBOX.1".into(), Span::none())
             .with_instances(vec![3, 1]);
         assert_eq!(cx.instances::<2>().unwrap(), [3, 1]);
         let err = cx.instances::<1>().unwrap_err();

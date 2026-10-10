@@ -13,7 +13,10 @@ use crate::queue::{Popped, Queue};
 use crate::subscribe::EventError;
 
 /// One consumer's subscription to an element of a provider.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// It serializes with serde, so a [`SubscriberStore`] can persist it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct SubscriberInfo {
     /// The name subscribed to, as the consumer wrote it: an exact name, a
     /// table path, or a pattern with `*` or `[alias]`.
@@ -26,6 +29,31 @@ pub struct SubscriberInfo {
     pub filter: Option<Filter>,
     /// The id the engine gave the subscription.
     pub id: u32,
+}
+
+impl SubscriberInfo {
+    /// A subscription with no filter. The engine gives subscriptions their
+    /// ids; this is for stores and tests.
+    pub fn new(
+        event: impl Into<String>,
+        inbox: impl Into<String>,
+        component_id: i32,
+        id: u32,
+    ) -> Self {
+        SubscriberInfo {
+            event: event.into(),
+            inbox: inbox.into(),
+            component_id,
+            filter: None,
+            id,
+        }
+    }
+
+    /// The same subscription with a filter.
+    pub fn with_filter(mut self, filter: Filter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
 }
 
 /// A change to a provider's subscribers. Made by

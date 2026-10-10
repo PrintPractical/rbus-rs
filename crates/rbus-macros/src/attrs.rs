@@ -146,6 +146,34 @@ pub(crate) struct ModelAttrs {
     pub(crate) on_subscribe: Option<Path>,
     pub(crate) on_commit: Option<Path>,
     pub(crate) serialized: bool,
+    /// `crate = "path"`: where `rbus` is, if not `::rbus`.
+    pub(crate) krate: Option<Path>,
+}
+
+/// Parses `crate = "path"`: the path to `rbus` when the dependency is
+/// renamed, as serde's `crate` option does.
+pub(crate) fn crate_path(meta: &syn::meta::ParseNestedMeta<'_>) -> Result<Path> {
+    let lit: LitStr = meta.value()?.parse()?;
+    lit.parse()
+}
+
+/// The options of a `#[derive(Row)]` struct: only `crate`.
+pub(crate) fn row_crate(attrs: &[Attribute]) -> Result<Option<Path>> {
+    let mut krate = None;
+    for attr in attrs.iter().filter(|a| is_rbus(a)) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("crate") {
+                krate = Some(crate_path(&meta)?);
+                Ok(())
+            } else {
+                Err(meta.error(
+                    "a row takes no struct options but `crate`; its table's field in the model \
+                     or outer row names it",
+                ))
+            }
+        })?;
+    }
+    Ok(krate)
 }
 
 impl ModelAttrs {
@@ -162,10 +190,12 @@ impl ModelAttrs {
                     out.on_commit = Some(meta.value()?.parse()?);
                 } else if p.is_ident("serialized") {
                     out.serialized = true;
+                } else if p.is_ident("crate") {
+                    out.krate = Some(crate_path(&meta)?);
                 } else {
                     return Err(meta.error(
                         "unknown rbus model option; expected one of: path, on_subscribe, \
-                         on_commit, serialized",
+                         on_commit, serialized, crate",
                     ));
                 }
                 Ok(())

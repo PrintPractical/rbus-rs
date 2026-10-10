@@ -122,7 +122,7 @@ impl Provider for Fake {
             "A.Coded()" => Err(Fault::new(Status::InvalidOperation)
                 .with_detail(Object::new().with("error_code", Value::I32(7)))),
             "A.T.2.Do()" => Ok(Object::new().with("row", Value::U32(cx.instances::<1>()?[0]))),
-            _ => Err(Fault::not_allowed()),
+            _ => Err(Fault::invalid_operation()),
         }
     }
 
@@ -205,12 +205,12 @@ fn registry() -> (Registry, Arc<Fake>) {
 }
 
 fn cx() -> Context {
-    Context::new(Some("caller".into()), "rbus.c.INBOX.1".into(), Span::none())
+    Context::traced(Some("caller".into()), "rbus.c.INBOX.1".into(), Span::none())
 }
 
 fn decode<B: Body>(payload: Vec<u8>) -> B {
     let bytes = Bytes::from(payload);
-    let (mut body, meta) = split_method_payload(&bytes).unwrap();
+    let (mut body, meta) = split_method_payload(&bytes, &rbus_wire::Limits::DEFAULT).unwrap();
     assert_eq!(meta.method, Method::Response);
     B::decode(&mut body).unwrap()
 }
@@ -304,23 +304,70 @@ async fn pt8_partial_paths_and_wildcards() {
 }
 
 #[tokio::test]
-async fn p2_requests_run_concurrently_unless_serialized() {
-    for serialized in [false, true] {
-        let r = Arc::new(Registry::default());
-        let fake = Arc::new(Fake::new());
-        r.mount(fake.schema(), fake.clone(), serialized).unwrap();
-        let tasks: Vec<_> = (0..4)
-            .map(|_| {
-                let r = r.clone();
-                tokio::spawn(async move { get(&r, &["A.Slow"]).await })
-            })
-            .collect();
-        for t in tasks {
-            assert_eq!(t.await.unwrap().status, 0);
-        }
-        let max = fake.max_in_flight.load(Ordering::SeqCst);
-        assert_eq!(max == 1, serialized, "max in flight {max}");
+async fn p2_requests_run_concurrently() {
+    let (r, fake) = registry();
+    let r = Arc::new(r);
+    let tasks: Vec<_> = (0..4)
+        .map(|_| {
+            let r = r.clone();
+            tokio::spawn(async move { get(&r, &["A.Slow"]).await })
+        })
+        .collect();
+    for t in tasks {
+        assert_eq!(t.await.unwrap().status, 0);
     }
+    assert!(fake.max_in_flight.load(Ordering::SeqCst) > 1);
+}
+
+#[test]
+fn serialized_requests_are_found_by_name() {
+    let r = Registry::default();
+    let fake = Arc::new(Fake::new());
+    r.mount(fake.schema(), fake.clone(), true).unwrap();
+    let other = Schema::new().property("B.X", Access::ReadOnly);
+    r.mount(other, Arc::new(Fake::new()), false).unwrap();
+    let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(r.reaches_serialized(&names(&["A.Name"])));
+    assert!(r.reaches_serialized(&names(&["B.X", "A.Ok()"])));
+    // Partial paths, rows, and subscription templates.
+    assert!(r.reaches_serialized(&names(&["A."])));
+    assert!(r.reaches_serialized(&names(&["A.T."])));
+    assert!(r.reaches_serialized(&names(&["A.T.{i}.X"])));
+    assert!(r.reaches_serialized(&names(&["A.E!"])));
+    assert!(!r.reaches_serialized(&names(&["B.X"])));
+    assert!(!r.reaches_serialized(&names(&["Nobody.Here"])));
+    assert!(!r.reaches_serialized(&[]));
+}
+
+#[tokio::test]
+async fn the_serial_worker_runs_jobs_whole_and_in_order() {
+    let r = Registry::default();
+    let log = Arc::new(StdMutex::new(Vec::new()));
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
+    for i in 0..5u64 {
+        let log = log.clone();
+        let done = done_tx.clone();
+        // Earlier jobs take longer; run concurrently, they'd finish backwards.
+        r.run_serially(Box::pin(async move {
+            log.lock().unwrap().push(format!("start {i}"));
+            tokio::time::sleep(Duration::from_millis(5 * (5 - i))).await;
+            log.lock().unwrap().push(format!("end {i}"));
+            let _ = done.send(());
+        }));
+    }
+    // A panicking job doesn't stop the worker.
+    r.run_serially(Box::pin(async { panic!("handler bug") }));
+    let done = done_tx.clone();
+    r.run_serially(Box::pin(async move {
+        let _ = done.send(());
+    }));
+    for _ in 0..6 {
+        done_rx.recv().await.unwrap();
+    }
+    let expected: Vec<String> = (0..5)
+        .flat_map(|i| [format!("start {i}"), format!("end {i}")])
+        .collect();
+    assert_eq!(*log.lock().unwrap(), expected);
 }
 
 fn set_req(props: &[(&str, Value)], commit: bool, session: u32) -> Request {
@@ -423,6 +470,51 @@ async fn d8_legacy_sessions_are_buffered_until_commit() {
             "set A.Name,A.T.2.X Some(\"caller\")"
         ]
     );
+}
+
+#[tokio::test]
+async fn d8_legacy_sessions_are_per_inbox_bounded_and_dropped_with_the_caller() {
+    let r = Registry::new(&Limits::default().with_max_items(2));
+    let fake = Arc::new(Fake::new());
+    r.mount(fake.schema(), fake.clone(), false).unwrap();
+    r.add_local_row(0, "A.T.", RowId::from(1), &NoOut).unwrap();
+    let from = |inbox: &str| Context::traced(Some("caller".into()), inbox.into(), Span::none());
+    let buffer = |inbox: &'static str, v: &'static str| {
+        r.handle_test(
+            set_req(&[("A.Name", Value::from(v))], false, 1),
+            from(inbox),
+        )
+    };
+    // Two callers that claim the same component name don't share a session.
+    assert_eq!(
+        decode::<SetResponse>(buffer("rbus.a.INBOX.1", "a").await).status,
+        0
+    );
+    assert_eq!(
+        decode::<SetResponse>(buffer("rbus.b.INBOX.2", "b").await).status,
+        0
+    );
+    assert_eq!(
+        decode::<SetResponse>(buffer("rbus.a.INBOX.1", "a2").await).status,
+        0
+    );
+    // A third uncommitted value from one caller is refused.
+    let full: SetResponse = decode(buffer("rbus.a.INBOX.1", "a3").await);
+    assert_eq!(status(full.status), Status::OutOfResources);
+    // A caller that disconnects leaves nothing behind.
+    r.client_gone("rbus.a.INBOX.1");
+    let commit = r.handle_test(set_req(&[], true, 1), from("rbus.a.INBOX.1"));
+    assert_eq!(
+        status(decode::<SetResponse>(commit.await).status),
+        Status::InvalidInput
+    );
+    assert!(fake.calls().is_empty());
+    let commit = r.handle_test(
+        set_req(&[("A.T.1.X", Value::I32(1))], true, 1),
+        from("rbus.b.INBOX.2"),
+    );
+    assert_eq!(decode::<SetResponse>(commit.await).status, 0);
+    assert_eq!(fake.calls(), ["set A.Name,A.T.1.X Some(\"caller\")"]);
 }
 
 #[tokio::test]

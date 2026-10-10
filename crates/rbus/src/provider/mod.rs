@@ -10,6 +10,7 @@
 //! - [`DataModel`], a builder of closures for trees known only at run time.
 //!
 //! ```no_run
+//! # #[cfg(feature = "macros")] mod example {
 //! use rbus::provider::{Prop, Table};
 //!
 //! #[derive(rbus::Model, Default)]
@@ -31,6 +32,7 @@
 //! hosts.enable.set(true);                 // published to subscribers
 //! hosts.hosts.insert(Host { name: "printer".into() })?;
 //! # Ok(()) }
+//! # }
 //! ```
 //!
 //! Or implement [`Provider`] by hand and hand it to [`Rbus::provide`](crate::Rbus::provide).
@@ -93,7 +95,14 @@ use rbus_wire::value::{Object, Value};
 
 pub use context::{Change, Context, Transaction};
 pub use data_model::DataModel;
-pub use derive::{BoxFuture, Model, Row, relative, value_as};
+pub use derive::{BoxFuture, Model, Row};
+
+/// What the macros' output calls. Not part of the API: it changes with
+/// `rbus-macros`, which is pinned to the same release.
+#[doc(hidden)]
+pub mod __private {
+    pub use super::derive::value_as;
+}
 pub use events::{NoStore, SubscriberInfo, SubscriberStore, SubscriptionEvent, SubscriptionEvents};
 pub use fault::{Fault, SetFault};
 pub use handle::Handle;
@@ -104,10 +113,11 @@ pub use rbus_wire::event::{Filter, RelationOp};
 pub use schema::{Access, Element, ElementKind, Rows, Schema};
 pub use state::{Event, Prop, Table};
 
-pub(crate) use engine::{Registry, serve};
+pub(crate) use engine::{Registry, dispatch, ensure_poller};
+pub(crate) use handle::element_error;
 
 use crate::name::{MethodName, PropertyName, TablePath};
-use crate::subscribe::RowId;
+use crate::table::RowId;
 
 /// A data model served on the bus (decisions.md D3). The derive and
 /// attribute macros generate implementations of this trait; you can also
@@ -168,7 +178,7 @@ pub trait Provider: Send + Sync + 'static {
         alias: Option<&str>,
     ) -> impl Future<Output = Result<u32, Fault>> + Send {
         let _ = (cx, table, alias);
-        async { Err(Fault::not_allowed()) }
+        async { Err(Fault::invalid_operation()) }
     }
 
     /// A consumer removes a row of a [`Rows::Dynamic`] table. On success the
@@ -180,7 +190,7 @@ pub trait Provider: Send + Sync + 'static {
         row: &RowId,
     ) -> impl Future<Output = Result<(), Fault>> + Send {
         let _ = (cx, table, row);
-        async { Err(Fault::not_allowed()) }
+        async { Err(Fault::invalid_operation()) }
     }
 
     /// A consumer subscribes to one of the provider's elements. Return an

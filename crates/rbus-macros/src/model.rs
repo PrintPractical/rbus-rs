@@ -178,11 +178,13 @@ struct Gen {
     add_row: Vec<TokenStream>,
     remove_row: Vec<TokenStream>,
     bind: Vec<TokenStream>,
+    /// Expressions true when a member is in use by a registered row.
+    bound: Vec<TokenStream>,
     diff: Vec<TokenStream>,
 }
 
-fn generate(members: &[Member], derive: Derive) -> Gen {
-    let p = quote!(::rbus::provider);
+fn generate(members: &[Member], derive: Derive, krate: &TokenStream) -> Gen {
+    let p = quote!(#krate::provider);
     let mut g = Gen {
         describe: Vec::new(),
         get: Vec::new(),
@@ -190,6 +192,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
         add_row: Vec::new(),
         remove_row: Vec::new(),
         bind: Vec::new(),
+        bound: Vec::new(),
         diff: Vec::new(),
     };
     // Rows are borrowed mutably to set them; models are not.
@@ -220,7 +223,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                         quote!(self.#ident.store(value)),
                     ),
                     Derive::Row => (
-                        quote!(::std::result::Result::Ok(::rbus::IntoValue::into_value(
+                        quote!(::std::result::Result::Ok(#krate::IntoValue::into_value(
                             ::std::clone::Clone::clone(&self.#ident)
                         ))),
                         quote!(self.#ident = value),
@@ -231,7 +234,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                     let check = validate.as_ref().map(|v| quote!(#v(&value)?;));
                     g.set.push(quote! {
                         [#seg] => {
-                            let value: #ty = #p::value_as(value)?;
+                            let value: #ty = #p::__private::value_as(value)?;
                             #check
                             if apply {
                                 #store;
@@ -249,8 +252,8 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                         if self.#ident != old.#ident {
                             changes.push((
                                 ::std::format!("{}{}", prefix, #seg),
-                                ::rbus::IntoValue::into_value(::std::clone::Clone::clone(&old.#ident)),
-                                ::rbus::IntoValue::into_value(::std::clone::Clone::clone(&self.#ident)),
+                                #krate::IntoValue::into_value(::std::clone::Clone::clone(&old.#ident)),
+                                #krate::IntoValue::into_value(::std::clone::Clone::clone(&self.#ident)),
                             ));
                         }
                     });
@@ -316,6 +319,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                 g.bind.push(quote! {
                     self.#ident.bind(&::std::format!("{}{}.", prefix, #seg), handle);
                 });
+                g.bound.push(quote!(self.#ident.is_bound()));
             }
             Kind::Event => {
                 g.describe.push(quote! {
@@ -324,6 +328,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                 g.bind.push(quote! {
                     self.#ident.bind(::std::format!("{}{}", prefix, #seg), handle);
                 });
+                g.bound.push(quote!(self.#ident.is_bound()));
             }
             Kind::Object { ty } => {
                 g.describe.push(quote! {
@@ -350,6 +355,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                 g.bind.push(quote! {
                     #nested_trait::bind(&self.#ident, &::std::format!("{}{}.", prefix, #seg), handle);
                 });
+                g.bound.push(quote!(#nested_trait::is_bound(&self.#ident)));
                 if derive == Derive::Row {
                     g.diff.push(quote! {
                         #p::Row::diff(
@@ -367,19 +373,15 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
 }
 
 pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> {
-    let model_attrs = match derive {
-        Derive::Model => Some(ModelAttrs::parse(&input.attrs)?),
-        Derive::Row => {
-            if let Some(a) = input.attrs.iter().find(|a| crate::attrs::is_rbus(a)) {
-                return Err(syn::Error::new_spanned(
-                    a,
-                    "a row takes no struct options; its table's field in the model or outer \
-                     row names it",
-                ));
-            }
-            None
+    let (model_attrs, krate) = match derive {
+        Derive::Model => {
+            let attrs = ModelAttrs::parse(&input.attrs)?;
+            let krate = attrs.krate.clone();
+            (Some(attrs), krate)
         }
+        Derive::Row => (None, crate::attrs::row_crate(&input.attrs)?),
     };
+    let krate = krate.map_or_else(|| quote!(::rbus), |p| quote!(#p));
     let members = members(&input, derive)?;
     let Gen {
         describe,
@@ -388,9 +390,10 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
         add_row,
         remove_row,
         bind,
+        bound,
         diff,
-    } = generate(&members, derive);
-    let p = quote!(::rbus::provider);
+    } = generate(&members, derive, &krate);
+    let p = quote!(#krate::provider);
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let (trait_name, self_set) = match derive {
@@ -398,7 +401,7 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
         Derive::Row => (quote!(#p::Row), quote!(&mut self)),
     };
     let not_found = quote!(_ => ::std::result::Result::Err(#p::Fault::not_found()),);
-    let not_allowed = quote!(_ => ::std::result::Result::Err(#p::Fault::not_allowed()),);
+    let not_allowed = quote!(_ => ::std::result::Result::Err(#p::Fault::invalid_operation()),);
     let rows = quote! {
         #[allow(unused_variables)]
         fn add_row<'rbus>(
@@ -420,7 +423,7 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
             &'rbus self,
             cx: &'rbus #p::Context,
             path: &'rbus [&'rbus str],
-            row: &'rbus ::rbus::RowId,
+            row: &'rbus #krate::RowId,
         ) -> #p::BoxFuture<'rbus, ::std::result::Result<(), #p::Fault>> {
             ::std::boxed::Box::pin(async move {
                 match path {
@@ -443,9 +446,13 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
                 &self,
                 old: &Self,
                 prefix: &str,
-                changes: &mut ::std::vec::Vec<(::std::string::String, ::rbus::Value, ::rbus::Value)>,
+                changes: &mut ::std::vec::Vec<(::std::string::String, #krate::Value, #krate::Value)>,
             ) {
                 #(#diff)*
+            }
+
+            fn is_bound(&self) -> bool {
+                false #(|| #bound)*
             }
         },
     };
@@ -456,7 +463,7 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
                 schema
             }
 
-            fn get(&self, path: &[&str]) -> ::std::result::Result<::rbus::Value, #p::Fault> {
+            fn get(&self, path: &[&str]) -> ::std::result::Result<#krate::Value, #p::Fault> {
                 match path {
                     #(#get)*
                     #not_found
@@ -467,7 +474,7 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
             fn set(
                 #self_set,
                 path: &[&str],
-                value: &::rbus::Value,
+                value: &#krate::Value,
                 apply: bool,
             ) -> ::std::result::Result<(), #p::Fault> {
                 match path {
@@ -482,15 +489,25 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
     };
     if let Some(attrs) = model_attrs {
         if let Some(path) = &attrs.path {
-            out.extend(provider_impl(&input, &attrs, &check_path(path, false)?));
+            out.extend(provider_impl(
+                &input,
+                &attrs,
+                &check_path(path, false)?,
+                &krate,
+            ));
         }
     }
     Ok(out)
 }
 
 /// `impl Provider` for a model with a path.
-fn provider_impl(input: &DeriveInput, attrs: &ModelAttrs, path: &str) -> TokenStream {
-    let p = quote!(::rbus::provider);
+fn provider_impl(
+    input: &DeriveInput,
+    attrs: &ModelAttrs,
+    path: &str,
+    krate: &TokenStream,
+) -> TokenStream {
+    let p = quote!(#krate::provider);
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let serialized = attrs
@@ -523,8 +540,8 @@ fn provider_impl(input: &DeriveInput, attrs: &ModelAttrs, path: &str) -> TokenSt
             async fn get(
                 &self,
                 _cx: &#p::Context,
-                name: &::rbus::PropertyName,
-            ) -> ::std::result::Result<::rbus::Value, #p::Fault> {
+                name: &#krate::PropertyName,
+            ) -> ::std::result::Result<#krate::Value, #p::Fault> {
                 #p::Model::get_at(self, #path, name)
             }
 
@@ -544,7 +561,7 @@ fn provider_impl(input: &DeriveInput, attrs: &ModelAttrs, path: &str) -> TokenSt
             async fn add_row(
                 &self,
                 cx: &#p::Context,
-                table: &::rbus::TablePath,
+                table: &#krate::TablePath,
                 alias: ::std::option::Option<&str>,
             ) -> ::std::result::Result<u32, #p::Fault> {
                 #p::Model::add_row_at(self, #path, cx, table, alias).await
@@ -553,8 +570,8 @@ fn provider_impl(input: &DeriveInput, attrs: &ModelAttrs, path: &str) -> TokenSt
             async fn remove_row(
                 &self,
                 cx: &#p::Context,
-                table: &::rbus::TablePath,
-                row: &::rbus::RowId,
+                table: &#krate::TablePath,
+                row: &#krate::RowId,
             ) -> ::std::result::Result<(), #p::Fault> {
                 #p::Model::remove_row_at(self, #path, cx, table, row).await
             }

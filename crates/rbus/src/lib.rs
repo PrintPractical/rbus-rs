@@ -25,8 +25,9 @@
 //!   strings work too and are checked at the call.
 //! - Scalars convert through [`RbusType`]; structured data through serde
 //!   ([`to_object`], [`from_object`]).
-//! - Every failure is an [`Error`].
-//! - To serve a data model, derive [`Model`] (or write a
+//! - Every call fails with an [`Error`]; a subscription stream yields
+//!   [`EventError`] items for events it lost or couldn't convert.
+//! - To serve a data model, derive [`provider::Model`] (or write a
 //!   [`provider::Provider`] another way) and register it with
 //!   [`Rbus::provide`].
 //!
@@ -45,6 +46,7 @@ mod error;
 pub mod name;
 pub mod provider;
 mod queue;
+mod retry;
 mod subscribe;
 mod table;
 mod tree;
@@ -52,6 +54,11 @@ mod types;
 
 #[cfg(test)]
 mod engine_tests;
+
+// The README's examples compile as doctests. They use the macros.
+#[cfg(all(doctest, feature = "macros"))]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 pub use bus::{DEFAULT_SOCKET, Rbus, RbusBuilder, Timeouts};
 pub use conn::ConnectionState;
@@ -61,11 +68,11 @@ pub use discover::{Advisories, Advisory, Discover};
 pub use error::{Error, Result, Status, TypeError};
 pub use name::{EventName, IntoName, MethodName, Name, NameError, PropertyName, TablePath};
 pub use queue::Overflow;
+pub use rbus_wire::Limits;
 pub use rbus_wire::value::{DateTime, Object, ObjectKind, Property, Value};
-pub use subscribe::{
-    EventError, Retry, RowEvent, RowId, SubscribeBuilder, Subscription, ValueChange,
-};
-pub use table::{AddRow, RowRef, Table};
+pub use retry::Retry;
+pub use subscribe::{EventError, RowEvent, SubscribeBuilder, Subscription, ValueChange};
+pub use table::{AddRow, RemoteTable, RowId, RowRef};
 pub use tree::{Tree, TreeFailure};
 pub use types::{IntoValue, RbusType};
 
@@ -74,5 +81,7 @@ pub use types::{IntoValue, RbusType};
 #[cfg(feature = "macros")]
 pub use rbus_macros::{Model, Row, name, provider};
 
-/// The wire codecs this crate is built on.
+/// The wire codecs this crate is built on. Hidden: its API follows its own
+/// versions, and nothing here needs it.
+#[doc(hidden)]
 pub use rbus_wire as wire;

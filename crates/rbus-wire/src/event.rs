@@ -5,7 +5,8 @@ use crate::msgpack::{Reader, Writer};
 use crate::value::{Object, Value};
 
 /// Relational operator of a filter (`rbusFilter_RelationOperator_t`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum RelationOp {
     /// `>`
     GreaterThan,
@@ -31,7 +32,8 @@ const RELATION_OPS: [RelationOp; 6] = [
 ];
 
 /// A subscription filter: a relation against a value, or a logical combination.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Filter {
     /// `value <op> operand`.
     Relation {
@@ -107,6 +109,10 @@ impl Filter {
 
     /// Reads a filter (`rbusFilter_InitFromMessage`).
     pub fn decode(r: &mut Reader<'_>) -> Result<Filter> {
+        r.nested(Filter::decode_one)
+    }
+
+    fn decode_one(r: &mut Reader<'_>) -> Result<Filter> {
         let invalid = |what: &str, code: i32| Error::InvalidValue {
             ty: "filter",
             reason: format!("unknown {what} {code}"),

@@ -78,6 +78,15 @@ pub enum Error {
         value: String,
     },
 
+    /// A payload went past one of the decoder's [`Limits`](crate::Limits).
+    #[error("{what} exceeds the limit of {max}")]
+    LimitExceeded {
+        /// What was too large: `"nesting depth"` or `"item count"`.
+        what: &'static str,
+        /// The configured limit.
+        max: usize,
+    },
+
     /// A broker control message that is not valid JSON of the expected shape.
     #[error("invalid control message: {0}")]
     Json(#[from] serde_json::Error),

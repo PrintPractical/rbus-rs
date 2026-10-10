@@ -1,5 +1,6 @@
 //! Partial-path and wildcard gets (C3, C4) with per-component failures (C5).
 
+use indexmap::IndexMap;
 use rbus_wire::body::{GetRequest, GetResponse};
 use rbus_wire::message::Method;
 use rbus_wire::value::{Object, ObjectKind, Property, Value};
@@ -14,6 +15,7 @@ use crate::name::{IntoName, Name};
 
 /// A component whose part of a [`Tree`] could not be read (C5).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct TreeFailure {
     /// The component.
     pub component: String,
@@ -87,15 +89,18 @@ impl Tree {
 
     /// The hierarchy below [`Tree::root`]: one nested object per path
     /// segment. Objects whose children are instance numbers are
-    /// multi-instance, so they read as sequences.
+    /// multi-instance, so they read as sequences. A name that is both a
+    /// value and a parent keeps the first one seen. Names more than 128
+    /// segments deep are left out, as no data model nests that far;
+    /// [`Tree::iter`] still has them.
     pub fn to_object(&self) -> Object {
         let root = self.root();
-        let mut top = Object::new();
+        let mut top = Node::default();
         for p in &self.properties {
             let rel = p.name.strip_prefix(root).unwrap_or(&p.name);
-            insert(&mut top, rel, p.value.clone());
+            top.insert(rel, &p.value);
         }
-        top
+        top.into_object()
     }
 
     /// Deserializes the hierarchy below [`Tree::root`] with serde. TR-181
@@ -114,32 +119,70 @@ impl<'a> IntoIterator for &'a Tree {
     }
 }
 
-/// Inserts `value` at the dotted path `rel` below `obj`. A name that is both
-/// a value and a parent keeps the first one seen.
-fn insert(obj: &mut Object, rel: &str, value: Value) {
-    let (head, rest) = match rel.split_once('.') {
-        Some((h, r)) if !r.is_empty() => (h, Some(r)),
-        Some((h, _)) => (h, None),
-        None => (rel, None),
-    };
-    if head.parse::<u32>().is_ok() && obj.properties.is_empty() {
-        obj.kind = ObjectKind::MultiInstance;
-    }
-    let slot = obj.properties.iter().position(|p| p.name == head);
-    match (rest, slot) {
-        (None, None) => obj.properties.push(Property::new(head, value)),
-        (None, Some(_)) => {}
-        (Some(rest), None) => {
-            let mut child = Object::new();
-            insert(&mut child, rest, value);
-            obj.properties
-                .push(Property::new(head, Value::Object(child)));
+/// The deepest name, in segments, that [`Tree::to_object`] places.
+const MAX_SEGMENTS: usize = 128;
+
+/// The hierarchy being built: children in the order first seen, found by
+/// name in constant time.
+#[derive(Default)]
+struct Node {
+    multi_instance: bool,
+    children: IndexMap<String, Slot>,
+}
+
+enum Slot {
+    Value(Value),
+    Node(Node),
+}
+
+impl Node {
+    /// Places `value` at the dotted path `rel`, without recursing.
+    fn insert(&mut self, rel: &str, value: &Value) {
+        let mut segments: Vec<&str> = rel.split('.').collect();
+        if segments.len() > 1 && segments.last() == Some(&"") {
+            segments.pop();
         }
-        (Some(rest), Some(i)) => {
-            if let Value::Object(child) = &mut obj.properties[i].value {
-                insert(child, rest, value);
+        if segments.len() > MAX_SEGMENTS {
+            return;
+        }
+        let mut node = self;
+        let last = segments.len() - 1;
+        for (i, seg) in segments.into_iter().enumerate() {
+            if node.children.is_empty() && seg.parse::<u32>().is_ok() {
+                node.multi_instance = true;
+            }
+            if i == last {
+                node.children
+                    .entry(seg.to_owned())
+                    .or_insert_with(|| Slot::Value(value.clone()));
+                return;
+            }
+            let slot = node
+                .children
+                .entry(seg.to_owned())
+                .or_insert_with(|| Slot::Node(Node::default()));
+            match slot {
+                Slot::Node(child) => node = child,
+                // A value already sits here; it wins.
+                Slot::Value(_) => return,
             }
         }
+    }
+
+    /// The object for this node. Recursion is bounded by `MAX_SEGMENTS`.
+    fn into_object(self) -> Object {
+        let mut obj = Object::new();
+        if self.multi_instance {
+            obj.kind = ObjectKind::MultiInstance;
+        }
+        for (name, slot) in self.children {
+            let value = match slot {
+                Slot::Value(v) => v,
+                Slot::Node(n) => Value::Object(n.into_object()),
+            };
+            obj.properties.push(Property::new(name, value));
+        }
+        obj
     }
 }
 
@@ -192,6 +235,7 @@ impl Rbus {
                 properties: Vec::new(),
                 failures: Vec::new(),
             };
+            let mut succeeded = false;
             for (component, call) in pending {
                 let result = match call {
                     Ok(call) => call.await,
@@ -204,11 +248,15 @@ impl Rbus {
                         status,
                     }),
                 }) {
-                    Ok(props) => tree.properties.extend(props),
+                    Ok(props) => {
+                        succeeded = true;
+                        tree.properties.extend(props);
+                    }
                     Err(error) => tree.failures.push(TreeFailure { component, error }),
                 }
             }
-            if tree.properties.is_empty() && !tree.failures.is_empty() {
+            // An empty answer is still an answer.
+            if !succeeded && !tree.failures.is_empty() {
                 return Err(tree.failures.remove(0).error);
             }
             Ok(tree)
@@ -333,5 +381,24 @@ mod tests {
         let flat = tree("X", &[("X", Value::I32(1))]);
         assert_eq!(flat.root(), "");
         assert_eq!(flat.to_object().get("X"), Some(&Value::I32(1)));
+    }
+
+    #[test]
+    fn hostile_names_cost_little() {
+        // A name a million segments deep is left out of the hierarchy,
+        // without recursing once per segment.
+        let deep = "D.".to_owned() + &"a.".repeat(1_000_000) + "x";
+        let mut props = vec![(deep.as_str(), Value::I32(1))];
+        // Many siblings are found by index, not by scanning.
+        let wide: Vec<String> = (0..50_000).map(|i| format!("D.W.N{i}")).collect();
+        props.extend(wide.iter().map(|n| (n.as_str(), Value::I32(2))));
+        let t = tree("D.", &props);
+        let obj = t.to_object();
+        assert_eq!(obj.properties.len(), 1, "only W");
+        let Value::Object(w) = &obj.properties[0].value else {
+            panic!("W is an object")
+        };
+        assert_eq!(w.properties.len(), 50_000);
+        assert_eq!(t.get(&deep), Some(&Value::I32(1)));
     }
 }

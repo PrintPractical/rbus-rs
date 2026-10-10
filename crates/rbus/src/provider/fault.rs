@@ -81,7 +81,7 @@ impl Fault {
 
     /// The provider doesn't support this operation (`InvalidOperation`), as
     /// a C provider answers when a handler is missing.
-    pub fn not_allowed() -> Self {
+    pub fn invalid_operation() -> Self {
         Fault::new(Status::InvalidOperation)
     }
 
@@ -216,7 +216,7 @@ mod tests {
             (Fault::invalid_type("t"), Status::InvalidParameterType),
             (Fault::invalid_input("i"), Status::InvalidInput),
             (Fault::access_denied(), Status::AccessNotAllowed),
-            (Fault::not_allowed(), Status::InvalidOperation),
+            (Fault::invalid_operation(), Status::InvalidOperation),
             (Fault::invalid_method(), Status::InvalidMethod),
             (Fault::from(Status::Timeout), Status::Timeout),
         ];

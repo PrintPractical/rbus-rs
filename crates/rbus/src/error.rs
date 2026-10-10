@@ -1,6 +1,6 @@
 //! The error type of every bus operation.
 
-use rbus_wire::value::{Object, Value};
+use rbus_wire::value::{Object, TypeTag, Value};
 
 pub use rbus_wire::status::Status;
 
@@ -58,7 +58,8 @@ pub enum Error {
         op: &'static str,
     },
 
-    /// The connection to the broker is closed.
+    /// The connection to the broker is closed, or was lost and is being made
+    /// again (see [`crate::ConnectionState`]).
     #[error("disconnected from broker")]
     Disconnected,
 
@@ -147,26 +148,27 @@ impl serde::de::Error for TypeError {
 
 /// A short name for a value's type, for error messages.
 pub(crate) fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Bool(_) => "bool",
-        Value::Char(_) => "char",
-        Value::Byte(_) => "byte",
-        Value::I8(_) => "i8",
-        Value::U8(_) => "u8",
-        Value::I16(_) => "i16",
-        Value::U16(_) => "u16",
-        Value::I32(_) => "i32",
-        Value::U32(_) => "u32",
-        Value::I64(_) => "i64",
-        Value::U64(_) => "u64",
-        Value::F32(_) => "f32",
-        Value::F64(_) => "f64",
-        Value::DateTime(_) => "datetime",
-        Value::String(_) => "string",
-        Value::Bytes(_) => "bytes",
-        Value::Properties(_) => "property list",
-        Value::Object(_) => "object",
-        Value::None => "none",
+    // By tag, which rbus matches exhaustively; `Value` is non-exhaustive.
+    match v.type_tag() {
+        TypeTag::Bool => "bool",
+        TypeTag::Char => "char",
+        TypeTag::Byte => "byte",
+        TypeTag::I8 => "i8",
+        TypeTag::U8 => "u8",
+        TypeTag::I16 => "i16",
+        TypeTag::U16 => "u16",
+        TypeTag::I32 => "i32",
+        TypeTag::U32 => "u32",
+        TypeTag::I64 => "i64",
+        TypeTag::U64 => "u64",
+        TypeTag::F32 => "f32",
+        TypeTag::F64 => "f64",
+        TypeTag::DateTime => "datetime",
+        TypeTag::String => "string",
+        TypeTag::Bytes => "bytes",
+        TypeTag::Properties => "property list",
+        TypeTag::Object => "object",
+        TypeTag::None => "none",
     }
 }
 

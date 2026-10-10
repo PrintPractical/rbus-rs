@@ -6,26 +6,19 @@ use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rbus_wire::control::{self, ResultReply, Route};
 use tracing::{Instrument, debug, debug_span};
 
 use crate::bus::Rbus;
 use crate::error::{Error, Result, Status};
-use crate::name::{IntoName, TablePath};
+use crate::name::{IntoName, Name, PropertyName, TablePath};
 use crate::provider::Provider;
 use crate::provider::engine::DynProvider;
 use crate::provider::events::{NoStore, SubscriberInfo, SubscriberStore, SubscriptionEvents};
 use crate::provider::handle::{Handle, element_error};
 use crate::provider::model::{MountId, SchemaError};
-use crate::subscribe::RowId;
+use crate::table::RowId;
+use crate::table::RowRef;
 use crate::types::IntoValue;
-
-/// The broker's answer to an alias that is already registered
-/// (`RT_ERROR_DUPLICATE_ENTRY`).
-const ALIAS_DUPLICATE: i32 = 1001;
-/// The broker's answer to an alias that clashes with a table or property
-/// (`RT_ERROR_PROTOCOL_ERROR`), which rbus maps to `INVALID_NAMESPACE`.
-const ALIAS_CONFLICT: i32 = 1003;
 
 impl Rbus {
     /// Registers `provider` and serves its data model until the returned
@@ -60,10 +53,26 @@ pub struct Provide<P> {
     store: Arc<dyn SubscriberStore>,
 }
 
+impl<P> fmt::Debug for Provide<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Provide")
+            .field("provider", &std::any::type_name::<P>())
+            .field("serialized", &self.serialized)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<P: Provider> Provide<P> {
     /// Serves this provider's requests one at a time, in arrival order, for
     /// code written for C's single callback thread. By default each request
     /// runs as its own task.
+    ///
+    /// Each request is served whole before the next starts: a set's checks,
+    /// handler and events, or every property of a partial-path get. The
+    /// engine's own reads (value-change polling, `notify_changed`) don't wait
+    /// their turn, so a handler may call them. Like C's callback thread, a
+    /// handler must not wait on a request to its own serialized provider:
+    /// it would queue behind itself until it timed out.
     pub fn serialized(mut self) -> Self {
         self.serialized = true;
         self
@@ -130,7 +139,9 @@ impl<P: Provider> IntoFuture for Provide<P> {
                 // record the rows they start with.
                 provided.provider.attach(handle);
                 let provided = provided.register(names).await?;
-                conn.registry.restore(id, &***conn);
+                if conn.registry.restore(id, &***conn) {
+                    crate::provider::ensure_poller(conn);
+                }
                 Ok(provided)
             }
             .instrument(span)
@@ -144,12 +155,13 @@ impl<P: Provider> IntoFuture for Provide<P> {
 ///
 /// It holds a clone of the [`Rbus`] it was registered on, so the connection
 /// stays open while it lives.
+#[must_use = "dropping a Provided unregisters the provider"]
 pub struct Provided<P> {
     provider: Arc<P>,
     bus: Rbus,
     id: MountId,
     handle: Handle,
-    /// The aliases registered with the broker.
+    /// The element names claimed for this provider.
     names: Vec<String>,
 }
 
@@ -158,38 +170,19 @@ impl<P> Provided<P> {
     /// flight at once (`rbus_addElement`). On any failure, the aliases that
     /// did register are removed again, as `rbus_regDataElements` does.
     async fn register(mut self, names: Vec<String>) -> Result<Self> {
-        let conn = &self.bus.inner.conn;
-        let route = conn.component_route;
-        let mut pending = Vec::with_capacity(names.len());
-        for name in names {
-            let request = conn.broker_request(control::TOPIC_SUBSCRIBE, &Route::add(&*name, route));
-            pending.push((name, request));
-        }
-        let mut failure = None;
-        for (name, request) in pending {
-            let reply = match request {
-                Ok(p) => p.wait(self.bus.inner.timeouts.broker, "register").await,
-                Err(e) => Err(e),
-            };
-            let result =
-                reply.and_then(|frame| Ok(control::decode::<ResultReply>(&frame.payload)?.result));
-            match result {
-                Ok(0) => self.names.push(name),
-                Ok(code) => {
-                    let s = match code {
-                        ALIAS_DUPLICATE => Status::ElementNameDuplicate,
-                        ALIAS_CONFLICT => Status::InvalidNamespace,
-                        _ => Status::BusError,
-                    };
-                    failure.get_or_insert_with(|| status(&name, s));
-                }
-                Err(e) => {
-                    failure.get_or_insert(e);
-                }
-            }
-        }
-        match failure {
-            // Dropping `self` unregisters what did register.
+        // Held before anything is awaited: if this future is dropped, the
+        // `Provided` releases every claimed name.
+        self.names = names.clone();
+        let results = self
+            .bus
+            .inner
+            .conn
+            .claim_aliases(names)
+            .await
+            .map_err(|_| Error::Disconnected)?;
+        match results.into_iter().find_map(|(_, r)| r.err()) {
+            // Dropping `self` releases the names, including those that did
+            // register.
             Some(e) => Err(e),
             None => {
                 debug!(names = self.names.len(), "provider registered");
@@ -216,8 +209,12 @@ impl<P> Provided<P> {
     }
 
     /// Removes a row; see [`Handle::remove_row`].
-    pub fn remove_row(&self, table: impl IntoName<TablePath>, inst: u32) -> Result<()> {
-        self.handle.remove_row(table, inst)
+    pub fn remove_row(
+        &self,
+        table: impl IntoName<TablePath>,
+        row: impl Into<RowRef>,
+    ) -> Result<()> {
+        self.handle.remove_row(table, row)
     }
 
     /// The rows of a table, in the order they were added.
@@ -235,7 +232,11 @@ impl<P> Provided<P> {
     /// provided.publish("Device.WiFi.Alarm!", &Alarm { level: 3 })?;
     /// # Ok(()) }
     /// ```
-    pub fn publish<T: serde::Serialize + ?Sized>(&self, event: &str, data: &T) -> Result<()> {
+    pub fn publish<T: serde::Serialize + ?Sized>(
+        &self,
+        event: impl IntoName<Name>,
+        data: &T,
+    ) -> Result<()> {
         self.handle.publish(event, data)
     }
 
@@ -243,7 +244,7 @@ impl<P> Provided<P> {
     /// itself (P9); see [`Handle::publish_value_change`].
     pub fn publish_value_change(
         &self,
-        property: &str,
+        property: impl IntoName<PropertyName>,
         old: impl IntoValue,
         new: impl IntoValue,
     ) -> Result<()> {
@@ -252,7 +253,7 @@ impl<P> Provided<P> {
 
     /// Reads a property again and publishes the change, if any; see
     /// [`Handle::notify_changed`].
-    pub async fn notify_changed(&self, property: &str) -> Result<()> {
+    pub async fn notify_changed(&self, property: impl IntoName<PropertyName>) -> Result<()> {
         self.handle.notify_changed(property).await
     }
 
@@ -281,11 +282,7 @@ impl<P> Drop for Provided<P> {
     /// does) and the provider's rows.
     fn drop(&mut self) {
         let conn = &self.bus.inner.conn;
-        if !conn.is_closed() {
-            for name in &self.names {
-                let _ = conn.send_control(&Route::remove(&**name, conn.component_route));
-            }
-        }
+        conn.release_aliases(&self.names);
         conn.registry.unmount(self.id);
     }
 }

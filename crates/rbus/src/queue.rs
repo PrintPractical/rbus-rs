@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 
 /// What a subscription does when its buffer is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Overflow {
     /// Drop the oldest event; the stream yields `Err(EventError::Lagged(n))`
     /// before the next one.

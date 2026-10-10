@@ -39,6 +39,12 @@ impl IntoValue for &str {
     }
 }
 
+impl IntoValue for &String {
+    fn into_value(self) -> Value {
+        Value::String(self.clone())
+    }
+}
+
 impl IntoValue for Value {
     fn into_value(self) -> Value {
         self
