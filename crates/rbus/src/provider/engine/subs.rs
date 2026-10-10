@@ -1,4 +1,4 @@
-//! The subscription registry (M5): subscribe and unsubscribe requests, and
+//! The subscription registry: subscribe and unsubscribe requests, and
 //! publishing to subscribers.
 //!
 //! Like `rbus.c`, the engine keeps every subscriber and sends each one its
@@ -12,7 +12,7 @@
 //!   is the setter), by polling a property declared with `Schema::poll`, or
 //!   when the provider reports it (`by` is our component).
 //! - **Row events** (`OBJECT_CREATED`, `OBJECT_DELETED`) go to subscribers of
-//!   the table, for rows added or removed by consumers or the provider (PT9).
+//!   the table, for rows added or removed by consumers or the provider.
 //!
 //! Patterns (`*`, `[alias]`) are matched against the rows when an event is
 //! sent, so rows added later are covered.
@@ -379,7 +379,7 @@ impl Registry {
                     if !added {
                         return Ok((kind, mount, None));
                     }
-                    // D9: intervals, durations and raw data are not supported.
+                    // Intervals, durations and raw data are not supported.
                     if opts.interval != 0 || opts.duration != 0 || req.raw_data {
                         return Err(Status::InvalidOperation);
                     }
@@ -465,7 +465,7 @@ impl Registry {
         handler.provider.get(&cx, &name).await.ok()
     }
 
-    /// The `INITIAL_VALUE` event for publishOnSubscribe (P15):
+    /// The `INITIAL_VALUE` event for publishOnSubscribe:
     /// `{initialValue}` for a property, `{numberOfEntries, path<i>...}` for a
     /// table, `{numberOfEntries, <name>...}` for a wildcard.
     async fn initial_value(
@@ -577,7 +577,8 @@ impl Registry {
         let mut restored = 0;
         for info in loaded {
             let mut state = self.state();
-            // The D35 key: a consumer may have subscribed again already.
+            // Same inbox, component, event and filter: a consumer may have
+            // subscribed again already.
             let same = |s: &Sub| {
                 s.info.inbox == info.inbox
                     && s.info.component_id == info.component_id
@@ -631,7 +632,7 @@ impl Registry {
             .collect()
     }
 
-    /// A stream of a provider's subscription changes (P8).
+    /// A stream of a provider's subscription changes.
     pub(crate) fn listen(&self, id: MountId) -> SubscriptionEvents {
         let queue = Arc::new(Queue::new(SUBSCRIPTION_EVENT_BUFFER, Overflow::DropOldest));
         match self.state().mount_mut(id) {
@@ -668,8 +669,7 @@ impl Registry {
         })
     }
 
-    /// Publishes a general event (P4). Without subscribers it does nothing
-    /// (D10).
+    /// Publishes a general event. Without subscribers it does nothing.
     pub(crate) fn publish_event(
         &self,
         id: MountId,
@@ -683,7 +683,7 @@ impl Registry {
         Ok(())
     }
 
-    /// Publishes a value change the provider made (P9).
+    /// Publishes a value change the provider made.
     pub(crate) fn publish_change(
         &self,
         id: MountId,
@@ -702,7 +702,7 @@ impl Registry {
     }
 
     /// Reads a property again and publishes a value change if it differs
-    /// from the last value subscribers saw (P11).
+    /// from the last value subscribers saw.
     pub(crate) async fn notify_changed(
         &self,
         id: MountId,
@@ -809,8 +809,7 @@ impl Registry {
         }
     }
 
-    /// Polls the watched properties declared with `Schema::poll` that are
-    /// due (P10).
+    /// Polls the watched properties declared with `Schema::poll` that are due.
     pub(crate) async fn poll_once(&self, out: &dyn Outbox, now: Instant) {
         let due: Vec<(Found, Handler)> = {
             let mut state = self.state();

@@ -16,11 +16,11 @@
 //! - **Resubscription**: a connect advisory (another client joined the bus)
 //!   wakes a debounced task that re-sends every subscription, because a C
 //!   provider that restarted has forgotten ours.
-//! - **Reconnect** (L5): when the socket is lost, the connection task fails
+//! - **Reconnect**: when the socket is lost, the connection task fails
 //!   every pending request and, if the builder asked for it, connects again
 //!   with backoff. On the new socket it registers the inbox, the component and
 //!   the advisory route before anything else, then re-registers every element
-//!   alias and re-sends every subscription (D37). Frames queued for the lost
+//!   alias and re-sends every subscription. Frames queued for the lost
 //!   socket are dropped, never sent on the new one; frames queued while
 //!   reconnecting are dropped too, unless the new socket is already up.
 
@@ -68,7 +68,7 @@ const RESUBSCRIBE_DEBOUNCE: Duration = Duration::from_millis(250);
 pub enum ConnectionState {
     /// Connected and registered.
     Connected,
-    /// The broker went away and the connection is being made again (L5).
+    /// The broker went away and the connection is being made again.
     /// Calls fail with [`crate::Error::Disconnected`] meanwhile; subscriptions
     /// and providers stay in place and are registered again on reconnect.
     Reconnecting,
@@ -644,7 +644,7 @@ impl Conn {
     /// Connects to the broker at `socket` and registers the inbox and the
     /// component. Registration is fire-and-forget, as in C: the broker handles
     /// a connection's frames in order, so later requests see the routes.
-    /// With `reconnect`, a lost socket is replaced (L5).
+    /// With `reconnect`, a lost socket is replaced.
     pub(crate) async fn connect(socket: &Path, component: &str, options: Options) -> Result<Conn> {
         let Options {
             timeouts,
@@ -731,7 +731,7 @@ impl Conn {
 }
 
 impl Drop for Conn {
-    /// Best-effort cleanup (L13): queue the unregistration, then let the
+    /// Best-effort cleanup: queue the unregistration, then let the
     /// connection task flush it and close the socket.
     fn drop(&mut self) {
         if !self.is_closed() {

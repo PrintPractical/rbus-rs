@@ -78,7 +78,7 @@ impl Outbox for Core {
 
 /// `RBUSCORE_ERROR_UNSUPPORTED_METHOD`: what `rbus_sendResponse` answers for
 /// a request no handler took (`rbuscore.c:2404`), and what we answer for
-/// direct mode (P19).
+/// direct mode.
 const UNSUPPORTED_METHOD: i32 = 9;
 
 /// [`Provider`] made object safe, so providers of different types can share
@@ -163,7 +163,7 @@ impl<P: Provider> DynProvider for P {
 struct Mount {
     schema: Schema,
     handler: Handler,
-    /// Streams of subscription changes (P8).
+    /// Streams of subscription changes.
     listeners: Vec<Weak<Queue<SubscriptionEvent>>>,
     store: Arc<dyn SubscriberStore>,
 }
@@ -176,7 +176,7 @@ struct Handler {
     serialized: bool,
 }
 
-/// A set buffered until its legacy session commits (D8).
+/// A set buffered until its legacy session commits.
 struct Buffered {
     requested: String,
     owner: MountId,
@@ -191,7 +191,7 @@ struct State {
     /// the caller disconnects.
     sessions: HashMap<(String, u32), Vec<Buffered>>,
     next_mount: MountId,
-    /// Every subscription to every provider (M5).
+    /// Every subscription to every provider.
     subs: Vec<subs::Sub>,
     next_sub_id: u32,
     /// The last value subscribers saw of each watched property.
@@ -382,8 +382,8 @@ impl Registry {
         state.prune_values();
     }
 
-    /// Adds a row on the provider's behalf (PT3) and publishes
-    /// `OBJECT_CREATED` (PT9).
+    /// Adds a row on the provider's behalf and publishes
+    /// `OBJECT_CREATED`.
     pub(crate) fn add_local_row(
         &self,
         id: MountId,

@@ -45,7 +45,7 @@ pub enum ElementKind {
     Table(Rows),
     /// A method, invoked with [`Provider::invoke`](crate::provider::Provider::invoke).
     Method,
-    /// An event (published from M5 on).
+    /// An event.
     Event,
 }
 
@@ -139,7 +139,7 @@ impl Schema {
     }
 
     /// Polls the property added last every `every`, and publishes a
-    /// value-change event to its subscribers when the value differs (P10).
+    /// value-change event to its subscribers when the value differs.
     /// C does this for every subscribed property (every 2 s); here it is
     /// opt-in, for values that change without the provider knowing, such as
     /// hardware counters. Changes made by a consumer's set are published

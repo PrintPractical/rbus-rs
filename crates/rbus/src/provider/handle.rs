@@ -13,7 +13,7 @@ use crate::table::RowRef;
 use crate::types::IntoValue;
 
 /// What a registered provider uses to publish events and manage its rows
-/// from anywhere: its own handlers, the app, or other tasks (P4, P9, PT3).
+/// from anywhere: its own handlers, the app, or other tasks.
 ///
 /// [`Provider::attach`](crate::provider::Provider::attach) hands one to the
 /// provider when it is registered; [`Provided::handle`](crate::provider::Provided::handle)
@@ -42,10 +42,9 @@ impl Handle {
             .ok_or(Error::Disconnected)
     }
 
-    /// Publishes a general event to its subscribers (P4). `data` is any
+    /// Publishes a general event to its subscribers. `data` is any
     /// serializable value that converts to an object, such as a struct or
-    /// an [`Object`](crate::Object). With no subscribers it does nothing
-    /// (D10).
+    /// an [`Object`](crate::Object). With no subscribers it does nothing.
     ///
     /// Fails with [`Status::ElementDoesNotExist`] unless `event` is an event
     /// of this provider's schema (rows included), and with
@@ -67,7 +66,7 @@ impl Handle {
     }
 
     /// Publishes a change of a property's value that the provider made
-    /// itself (P9, P11): subscribers get `{value, oldValue, by}`, with `by`
+    /// itself: subscribers get `{value, oldValue, by}`, with `by`
     /// our component, and filters apply. Nothing is sent if the values are
     /// equal or nobody is subscribed.
     pub fn publish_value_change(
@@ -102,8 +101,8 @@ impl Handle {
             .map_err(|s| element_error(&property, s))
     }
 
-    /// Adds a row the provider owns to one of its tables (PT3) and publishes
-    /// `OBJECT_CREATED` (PT9). `table` is the table's path with instance
+    /// Adds a row the provider owns to one of its tables and publishes
+    /// `OBJECT_CREATED`. `table` is the table's path with instance
     /// numbers for any outer rows: `Device.WiFi.Radio.` or
     /// `Device.Bridge.2.Port.`.
     ///
@@ -162,7 +161,7 @@ impl Handle {
         })
     }
 
-    /// The current subscribers to this provider's elements (P8). With a
+    /// The current subscribers to this provider's elements. With a
     /// name, only the subscriptions that cover it: an exact subscription,
     /// or a pattern (`*`, `[alias]`) that matches it now. Empty once the
     /// connection is gone.
@@ -173,7 +172,7 @@ impl Handle {
         }
     }
 
-    /// A stream of consumers subscribing and unsubscribing (P8). It ends
+    /// A stream of consumers subscribing and unsubscribing. It ends
     /// when the provider is dropped; it is empty if it already was.
     pub fn subscription_events(&self) -> SubscriptionEvents {
         match self.core() {

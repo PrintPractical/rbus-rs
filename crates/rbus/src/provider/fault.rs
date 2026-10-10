@@ -148,7 +148,7 @@ impl fmt::Display for Fault {
 impl std::error::Error for Fault {}
 
 /// Why a [`Transaction`](crate::provider::Transaction) failed, and at which
-/// parameter (C9). Without a name, the engine blames the first one.
+/// parameter. Without a name, the engine blames the first one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetFault {
     name: Option<PropertyName>,

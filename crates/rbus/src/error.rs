@@ -22,8 +22,8 @@ pub enum Error {
         status: Status,
     },
 
-    /// A set failed. `name` is the parameter the provider reported as failing
-    /// (C9); sets sent to other providers before it may have been applied.
+    /// A set failed. `name` is the parameter the provider reported as failing;
+    /// sets sent to other providers before it may have been applied.
     #[error("set failed at {name}: {status}")]
     SetFailed {
         /// The parameter that failed.
@@ -32,7 +32,7 @@ pub enum Error {
         status: Status,
     },
 
-    /// A method returned an error (M3). C providers describe the failure in the
+    /// A method returned an error. C providers describe the failure in the
     /// output object's `error_code` and `error_string` properties.
     #[error("method {method} failed: {status}{}", message.as_deref().map(|m| format!(" ({m})")).unwrap_or_default())]
     Method {

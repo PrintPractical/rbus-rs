@@ -39,7 +39,7 @@ fn write<T>(m: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     m.write().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A property whose value the model stores (P11). Consumers' gets read it,
+/// A property whose value the model stores. Consumers' gets read it,
 /// their sets write it, and changes the app makes with [`Prop::set`] are
 /// published to subscribers at once.
 ///
@@ -146,7 +146,7 @@ impl<T: fmt::Debug> fmt::Debug for Prop<T> {
     }
 }
 
-/// An event the model publishes (P4). `T` is the data, any type that
+/// An event the model publishes. `T` is the data, any type that
 /// serializes to an object.
 ///
 /// Events carry no state: clones publish the same event, and any two are
@@ -185,7 +185,7 @@ impl<T> Event<T> {
         lock(&self.bound).is_some()
     }
 
-    /// The consumers subscribed to this event (P8).
+    /// The consumers subscribed to this event.
     pub fn subscribers(&self) -> Vec<SubscriberInfo> {
         self.bound()
             .map(|b| b.handle.subscribers(Some(&b.name)))
@@ -195,7 +195,7 @@ impl<T> Event<T> {
 
 impl<T: serde::Serialize> Event<T> {
     /// Publishes the event to its subscribers. With no subscribers, or
-    /// before the model is registered, it does nothing (D10).
+    /// before the model is registered, it does nothing.
     ///
     /// Fails with [`Error::Type`] if `data` doesn't serialize to an object.
     pub fn publish(&self, data: impl Borrow<T>) -> Result<()> {
@@ -237,7 +237,7 @@ impl<T> fmt::Debug for Event<T> {
     }
 }
 
-/// A table whose rows the model stores (PT1, PT3–PT5). App inserts and
+/// A table whose rows the model stores. App inserts and
 /// consumers' `add_row` requests take the same path, so rows get the same
 /// instance numbers, aliases and events either way.
 ///
@@ -355,12 +355,12 @@ impl<R: Row> Table<R> {
     }
 
     /// Adds a row and returns its instance number. Once the model is
-    /// registered, the row's subscribers get `OBJECT_CREATED` (PT9).
+    /// registered, the row's subscribers get `OBJECT_CREATED`.
     pub fn insert(&self, row: R) -> Result<u32> {
         self.write().insert(None, row)
     }
 
-    /// Adds a row with an alias, so consumers can name it `[alias]` (PT4).
+    /// Adds a row with an alias, so consumers can name it `[alias]`.
     /// Fails with [`Status::ElementNameDuplicate`] if the alias is taken.
     pub fn insert_with_alias(&self, alias: impl Into<String>, row: R) -> Result<u32> {
         self.write().insert(Some(alias.into()), row)
@@ -455,7 +455,7 @@ impl<R: Row> Table<R> {
         self.read().rows.is_empty()
     }
 
-    /// The consumers subscribed to the table's row events (P8).
+    /// The consumers subscribed to the table's row events.
     pub fn subscribers(&self) -> Vec<SubscriberInfo> {
         match &self.read().bound {
             Some(b) => b.handle.subscribers(Some(&b.name)),
@@ -517,7 +517,7 @@ impl<R: Row> Table<R> {
         state.rows[i].1.set(&path[1..], value, apply)
     }
 
-    /// A consumer adds `row` (PT2). The table records it with the engine,
+    /// A consumer adds `row`. The table records it with the engine,
     /// with the rows of the tables inside it.
     #[doc(hidden)]
     pub fn insert_for(&self, alias: Option<&str>, row: R) -> Result<u32, Fault> {

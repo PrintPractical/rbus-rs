@@ -109,7 +109,7 @@ pub trait Model: Send + Sync + 'static {
 
     /// [`Provider::set`](crate::provider::Provider::set) for a model at
     /// `prefix`: the whole transaction is checked before anything is
-    /// stored, so a failure changes nothing (C9).
+    /// stored, so a failure changes nothing.
     fn set_at(&self, prefix: &str, tx: &Transaction) -> Result<(), SetFault> {
         self.check_transaction(prefix, tx)?;
         self.apply_transaction(prefix, tx);

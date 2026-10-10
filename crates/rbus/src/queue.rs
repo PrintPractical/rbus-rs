@@ -1,4 +1,4 @@
-//! The bounded queue between the connection task and one event stream (D12).
+//! The bounded queue between the connection task and one event stream.
 //!
 //! - **Drop-oldest** (the default): when full, the oldest item is dropped and
 //!   counted; the stream reports the count as `Lagged(n)` before its next item.

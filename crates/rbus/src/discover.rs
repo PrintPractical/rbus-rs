@@ -1,4 +1,4 @@
-//! Discovery through the broker (D1, D2, D4, D5).
+//! Discovery through the broker.
 
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -18,7 +18,7 @@ use crate::subscribe::EventError;
 /// Buffer of an advisory stream.
 const ADVISORY_BUFFER: usize = 256;
 
-/// A client joining or leaving the bus, as the broker announces it (D5).
+/// A client joining or leaving the bus, as the broker announces it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Advisory {
@@ -133,7 +133,7 @@ impl Rbus {
 }
 
 impl Discover<'_> {
-    /// The component that owns an element (D1).
+    /// The component that owns an element.
     ///
     /// ```no_run
     /// # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
@@ -150,14 +150,14 @@ impl Discover<'_> {
     }
 
     /// Every component with elements under `path`: one for an exact name,
-    /// possibly several for a partial path or wildcard (D1). Fails with
+    /// possibly several for a partial path or wildcard. Fails with
     /// [`Error::NotFound`] when there are none.
     pub async fn owners(&self, path: impl IntoName<Name>) -> Result<Vec<String>> {
         let path = path.into_name()?;
         Ok(self.bus.resolve_owners(&path).await?.0)
     }
 
-    /// The elements a component has registered (D2).
+    /// The elements a component has registered.
     pub async fn elements(&self, component: &str) -> Result<Vec<Name>> {
         let expr = Expression {
             expression: component.to_owned(),
@@ -174,7 +174,7 @@ impl Discover<'_> {
             .collect()
     }
 
-    /// Every component registered with the broker (D4). Client inboxes and
+    /// Every component registered with the broker. Client inboxes and
     /// broker topics are left out.
     pub async fn components(&self) -> Result<Vec<String>> {
         let mut items = self
@@ -188,7 +188,7 @@ impl Discover<'_> {
         Ok(items)
     }
 
-    /// A stream of clients connecting to and disconnecting from the bus (D5).
+    /// A stream of clients connecting to and disconnecting from the bus.
     /// It ends when the connection closes.
     pub fn advisories(&self) -> Advisories {
         let queue = Arc::new(Queue::new(ADVISORY_BUFFER, Overflow::DropOldest));

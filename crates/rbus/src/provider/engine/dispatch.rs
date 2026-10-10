@@ -44,7 +44,7 @@ impl Request {
             Method::Commit | Method::GetParameterAttributes => Request::Status(0),
             Method::Subscribe => Request::Subscribe(SubscribeRequest::decode(r)?, true),
             Method::Unsubscribe => Request::Subscribe(SubscribeRequest::decode(r)?, false),
-            // Direct mode is out of scope (P19, D14).
+            // Direct mode is out of scope.
             _ => Request::Status(UNSUPPORTED_METHOD),
         })
     }

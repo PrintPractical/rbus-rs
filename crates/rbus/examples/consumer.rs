@@ -15,7 +15,7 @@ async fn main() -> rbus::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "Device.DeviceInfo.UpTime".into());
 
-    // Come back after a broker restart instead of closing (L5).
+    // Come back after a broker restart instead of closing.
     let bus = Rbus::builder("com.example.consumer")
         .reconnect(Retry::exponential().max_elapsed(Duration::MAX))
         .connect()

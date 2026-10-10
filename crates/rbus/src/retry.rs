@@ -4,7 +4,7 @@ use std::time::Duration;
 
 /// A retry schedule: a delay that doubles up to a limit, until a deadline.
 ///
-/// It is used for retrying a subscription until its provider appears (E10),
+/// It is used for retrying a subscription until its provider appears,
 /// where only "no provider" is retried, and for reconnecting after the
 /// broker goes away ([`RbusBuilder::reconnect`](crate::RbusBuilder::reconnect)).
 ///

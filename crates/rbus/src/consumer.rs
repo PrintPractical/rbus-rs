@@ -1,4 +1,4 @@
-//! Consumer operations: get, set and invoke (C1, C2, C6, C7, C9, M1, M3).
+//! Consumer operations: get, set and invoke.
 
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
@@ -88,7 +88,7 @@ impl Rbus {
         Ok(owners)
     }
 
-    /// Gets one property (C1).
+    /// Gets one property.
     ///
     /// ```no_run
     /// # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
@@ -147,7 +147,7 @@ impl Rbus {
         })
     }
 
-    /// Gets several properties, with one request per owning component (C2).
+    /// Gets several properties, with one request per owning component.
     /// The result keeps the order of `names`.
     ///
     /// ```no_run
@@ -200,7 +200,7 @@ impl Rbus {
         .await
     }
 
-    /// Sets one property (C6).
+    /// Sets one property.
     ///
     /// ```no_run
     /// # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
@@ -225,7 +225,7 @@ impl Rbus {
         .await
     }
 
-    /// Starts a transaction that sets several properties (C7). Await it to
+    /// Starts a transaction that sets several properties. Await it to
     /// send it.
     ///
     /// ```no_run
@@ -240,8 +240,8 @@ impl Rbus {
     /// Each owning component gets one request carrying all of its properties,
     /// in the order the components first appear. The first failure stops the
     /// transaction and is reported as [`Error::SetFailed`] naming the failing
-    /// property (C9). Components already updated keep their new values: RBUS
-    /// has no cross-component rollback (C8 is out of scope).
+    /// property. Components already updated keep their new values: RBUS
+    /// has no cross-component rollback.
     pub fn set_many(&self) -> SetMany<'_> {
         SetMany {
             bus: self,
@@ -267,7 +267,7 @@ impl Rbus {
                 .map(|(n, v)| Property::new(n.to_string(), v))
                 .collect(),
             // The commit flag is a legacy session detail; rbus providers apply
-            // each request as a whole (D8).
+            // each request as a whole.
             commit: true,
         };
         let resp: SetResponse = self
@@ -308,7 +308,7 @@ impl Rbus {
         Ok(())
     }
 
-    /// Invokes a method and waits for its result (M1). Arguments and results
+    /// Invokes a method and waits for its result. Arguments and results
     /// go through serde ([`crate::to_object`]); use `()` for none, and
     /// [`crate::Object`] or [`Value`] to handle them dynamically.
     ///
@@ -324,7 +324,7 @@ impl Rbus {
     /// ```
     ///
     /// A failing method is reported as [`Error::Method`], with the provider's
-    /// `error_string` and its whole output object (M3).
+    /// `error_string` and its whole output object.
     pub async fn invoke<A, R>(&self, method: impl IntoName<MethodName>, args: A) -> Result<R>
     where
         A: Serialize,

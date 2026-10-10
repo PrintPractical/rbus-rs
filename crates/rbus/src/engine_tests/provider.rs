@@ -1,4 +1,4 @@
-//! M4 engine tests: what a provider sends and answers over the socket.
+//! Provider engine tests: what a provider sends and answers over the socket.
 
 use bytes::Bytes;
 use rbus_wire::body::{GetRequest, GetResponse, StatusResponse};
@@ -104,7 +104,7 @@ async fn p1_p3_register_serve_and_unregister() {
     let body: GetResponse = decode(&resp);
     assert_eq!(body.properties[0].value, Value::String("consumer".into()));
 
-    // Direct mode is refused (P19).
+    // Direct mode is refused.
     peer.send(inbound(78, "Device.M.Value", Method::OpenDirectConn, &req))
         .await;
     let resp: StatusResponse = decode(&peer.recv().await);
@@ -294,8 +294,7 @@ async fn bad_schemas_fail_before_any_io() {
     assert!(matches!(err, Error::Disconnected), "{err:?}");
 }
 
-/// A model written with the derives (M6), registered over the scripted
-/// socket.
+/// A model written with the derives, registered over the scripted socket.
 #[cfg(feature = "macros")]
 mod derived {
     use rbus_wire::body::{AddRowRequest, AddRowResponse, DeleteRowRequest};
