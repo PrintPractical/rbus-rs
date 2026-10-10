@@ -253,7 +253,7 @@ async fn subscribe_once(
         .wait(core.timeouts.subscribe, "subscribe")
         .await?;
     check_delivered(&frame, name)?;
-    let (mut body, _meta) = split_method_payload(&frame.payload)?;
+    let (mut body, _meta) = split_method_payload(&frame.payload, &core.limits)?;
     let resp = SubscribeResponse::decode_for(&mut body, initial)?;
     status_error(name, resp.status)?;
     Ok(resp)
@@ -267,7 +267,7 @@ async fn unsubscribe_once(core: &Arc<Core>, name: &str, id: i32) -> Result<()> {
     if frame.header.flags.contains(Flags::UNDELIVERABLE) {
         return Ok(());
     }
-    let (mut body, _meta) = split_method_payload(&frame.payload)?;
+    let (mut body, _meta) = split_method_payload(&frame.payload, &core.limits)?;
     status_error(name, StatusResponse::decode(&mut body)?.status)
 }
 

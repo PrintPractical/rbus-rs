@@ -22,6 +22,7 @@ use rmp::decode::{self, NumValueReadError, ValueReadError};
 use rmp::encode;
 
 use crate::error::{Error, Result};
+use crate::limits::Limits;
 
 const META_TRAILER_LEN: usize = 5;
 
@@ -111,25 +112,37 @@ pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
     source: Option<&'a Bytes>,
+    limits: Limits,
+    depth: u32,
+    items: usize,
 }
 
 impl<'a> Reader<'a> {
-    /// Reads the whole of `buf` (no meta section).
+    /// Reads the whole of `buf` (no meta section), with the default
+    /// [`Limits`].
     pub fn new(buf: &'a [u8]) -> Self {
         Reader {
             buf,
             pos: 0,
             source: None,
+            limits: Limits::DEFAULT,
+            depth: 0,
+            items: 0,
         }
     }
 
     /// Reads the whole of `bytes`; `bin` items become zero-copy slices of it.
     pub fn from_bytes(bytes: &'a Bytes) -> Self {
         Reader {
-            buf: bytes,
-            pos: 0,
             source: Some(bytes),
+            ..Reader::new(bytes)
         }
+    }
+
+    /// Decodes under `limits` instead of the defaults.
+    pub fn with_limits(mut self, limits: &Limits) -> Self {
+        self.limits = *limits;
+        self
     }
 
     fn sub(&self, buf: &'a [u8]) -> Reader<'a> {
@@ -137,7 +150,46 @@ impl<'a> Reader<'a> {
             buf,
             pos: 0,
             source: self.source,
+            limits: self.limits,
+            depth: 0,
+            items: 0,
         }
+    }
+
+    /// Runs `f` one nesting level deeper: for the containers that recurse
+    /// (objects, property lists, filters). Fails past
+    /// [`Limits::max_depth`] instead of overflowing the stack.
+    pub fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth >= self.limits.max_depth {
+            return Err(Error::LimitExceeded {
+                what: "nesting depth",
+                max: self.limits.max_depth as usize,
+            });
+        }
+        self.depth += 1;
+        let out = f(self);
+        self.depth -= 1;
+        out
+    }
+
+    /// Reads an `int32` item count, as C does before a list. A negative
+    /// count reads as zero, as C's loops do. The count is charged against
+    /// [`Limits::max_items`], and can't exceed the bytes left, since every
+    /// item takes at least one.
+    pub fn count(&mut self, what: &'static str) -> Result<usize> {
+        let n = usize::try_from(self.i32()?).unwrap_or(0);
+        if n > self.buf.len() - self.pos {
+            return Err(Error::Truncated(what));
+        }
+        self.items = self
+            .items
+            .checked_add(n)
+            .filter(|&total| total <= self.limits.max_items)
+            .ok_or(Error::LimitExceeded {
+                what: "item count",
+                max: self.limits.max_items,
+            })?;
+        Ok(n)
     }
 
     /// Splits this reader's whole input into its body and its meta section,

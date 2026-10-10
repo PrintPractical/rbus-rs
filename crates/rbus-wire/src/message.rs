@@ -8,6 +8,7 @@
 use bytes::Bytes;
 
 use crate::error::Result;
+use crate::limits::Limits;
 use crate::msgpack::{Reader, Writer};
 
 /// The method named in a request's meta section (`core/rbuscore_types.h`).
@@ -223,14 +224,24 @@ fn with_meta(body: &impl Body, meta: &MethodMeta) -> Vec<u8> {
 
 /// Splits a request or response payload into a body reader and its meta.
 /// `bin` items read from the body are zero-copy slices of `payload`.
-pub fn split_method_payload(payload: &Bytes) -> Result<(Reader<'_>, MethodMeta)> {
-    let (body, mut meta) = Reader::from_bytes(payload).split_meta()?;
+pub fn split_method_payload<'a>(
+    payload: &'a Bytes,
+    limits: &Limits,
+) -> Result<(Reader<'a>, MethodMeta)> {
+    let (body, mut meta) = Reader::from_bytes(payload)
+        .with_limits(limits)
+        .split_meta()?;
     Ok((body, MethodMeta::decode(&mut meta)?))
 }
 
 /// Splits an event payload into a body reader and its meta.
-pub fn split_event_payload(payload: &Bytes) -> Result<(Reader<'_>, EventMeta)> {
-    let (body, mut meta) = Reader::from_bytes(payload).split_meta()?;
+pub fn split_event_payload<'a>(
+    payload: &'a Bytes,
+    limits: &Limits,
+) -> Result<(Reader<'a>, EventMeta)> {
+    let (body, mut meta) = Reader::from_bytes(payload)
+        .with_limits(limits)
+        .split_meta()?;
     Ok((body, EventMeta::decode(&mut meta)?))
 }
 
@@ -268,7 +279,7 @@ mod tests {
         want.extend_from_slice(&[0xa1, 0, 0xa1, 0, 0xd2, 0, 0, 0, 1]);
         assert_eq!(p, want);
         let p = Bytes::from(p);
-        let (mut body, meta) = split_method_payload(&p).unwrap();
+        let (mut body, meta) = split_method_payload(&p, &Limits::DEFAULT).unwrap();
         assert_eq!(Status::decode(&mut body).unwrap().0, 0);
         assert_eq!(meta, MethodMeta::response());
     }
@@ -280,7 +291,7 @@ mod tests {
             tracestate: "k=v".into(),
         };
         let p = Bytes::from(request_payload(Method::Rpc, trace.clone(), &Status(5)));
-        let (_, meta) = split_method_payload(&p).unwrap();
+        let (_, meta) = split_method_payload(&p, &Limits::DEFAULT).unwrap();
         assert_eq!(meta, MethodMeta::request(Method::Rpc, trace));
         // A CCSP-style meta with only the method name.
         let mut w = Writer::new();
@@ -302,7 +313,7 @@ mod tests {
         let mut w = Writer::new();
         Status(1).encode(&mut w);
         let p = Bytes::from(w.finish_with_meta(|m| meta.encode(m)));
-        let (_, got) = split_event_payload(&p).unwrap();
+        let (_, got) = split_event_payload(&p, &Limits::DEFAULT).unwrap();
         assert_eq!(got, meta);
         let legacy = EventMeta {
             rbus2: false,

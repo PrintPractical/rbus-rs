@@ -88,6 +88,7 @@ impl TypeTag {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename = "$rbus::Value")]
+#[non_exhaustive]
 pub enum Value {
     /// `RBUS_BOOLEAN`
     Bool(bool),
@@ -350,9 +351,15 @@ pub fn encode_properties(props: &[Property], w: &mut Writer) {
 }
 
 /// Reads an int32 count followed by that many value records.
+/// A property list nests one level deeper than its container.
 pub fn decode_properties(r: &mut Reader<'_>) -> Result<Vec<Property>> {
-    let count = r.i32()?;
-    let mut props = Vec::with_capacity(usize::try_from(count).unwrap_or(0).min(1024));
+    r.nested(read_properties)
+}
+
+/// A property list as part of its container (an object's own properties).
+fn read_properties(r: &mut Reader<'_>) -> Result<Vec<Property>> {
+    let count = r.count("property list")?;
+    let mut props = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
         props.push(Property::decode(r)?);
     }
@@ -362,6 +369,7 @@ pub fn decode_properties(r: &mut Reader<'_>) -> Result<Vec<Property>> {
 /// Whether an object is a single instance or a table row set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename = "$rbus::ObjectKind")]
+#[non_exhaustive]
 pub enum ObjectKind {
     /// `RBUS_OBJECT_SINGLE_INSTANCE`
     #[default]
@@ -421,22 +429,24 @@ impl Object {
 
     /// Reads an object (`rbusObject_initFromMessage`).
     pub fn decode(r: &mut Reader<'_>) -> Result<Object> {
-        let name = r.str()?;
-        let kind = match r.i32()? {
-            1 => ObjectKind::MultiInstance,
-            _ => ObjectKind::Single,
-        };
-        let properties = decode_properties(r)?;
-        let count = r.i32()?;
-        let mut children = Vec::new();
-        for _ in 0..count {
-            children.push(Object::decode(r)?);
-        }
-        Ok(Object {
-            name,
-            kind,
-            properties,
-            children,
+        r.nested(|r| {
+            let name = r.str()?;
+            let kind = match r.i32()? {
+                1 => ObjectKind::MultiInstance,
+                _ => ObjectKind::Single,
+            };
+            let properties = read_properties(r)?;
+            let count = r.count("object children")?;
+            let mut children = Vec::with_capacity(count.min(1024));
+            for _ in 0..count {
+                children.push(Object::decode(r)?);
+            }
+            Ok(Object {
+                name,
+                kind,
+                properties,
+                children,
+            })
         })
     }
 }

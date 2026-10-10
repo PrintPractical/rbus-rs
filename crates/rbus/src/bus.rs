@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
-use crate::conn::{Conn, ConnectionState};
+use crate::conn::{Conn, ConnectionState, Options};
 use crate::error::Result;
 use crate::name::check_component;
 use crate::retry::Retry;
+use rbus_wire::Limits;
 
 /// The broker socket C clients use by default (`rbuscore.c:322`).
 pub const DEFAULT_SOCKET: &str = "/tmp/rtrouted";
@@ -97,6 +98,7 @@ impl Rbus {
             socket: PathBuf::from(DEFAULT_SOCKET),
             timeouts: Timeouts::default(),
             reconnect: None,
+            limits: Limits::DEFAULT,
         }
     }
 
@@ -160,6 +162,7 @@ pub struct RbusBuilder {
     socket: PathBuf,
     timeouts: Timeouts,
     reconnect: Option<Retry>,
+    limits: Limits,
 }
 
 impl RbusBuilder {
@@ -207,11 +210,36 @@ impl RbusBuilder {
         self
     }
 
+    /// Limits on what this connection accepts from peers: the largest
+    /// payload, the deepest nesting and the most items in one message.
+    /// Anything past them is dropped (a frame too large closes the socket,
+    /// as it can't be skipped). The defaults suit RDK devices; see
+    /// [`Limits`].
+    ///
+    /// ```no_run
+    /// # async fn demo() -> rbus::Result<()> {
+    /// use rbus::{Limits, Rbus};
+    ///
+    /// let bus = Rbus::builder("com.example.app")
+    ///     .limits(Limits::default().with_max_payload(32 * 1024 * 1024))
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
     /// Connects and registers the component.
     pub async fn connect(self) -> Result<Rbus> {
         check_component(&self.component)?;
-        let conn =
-            Conn::connect(&self.socket, &self.component, self.timeouts, self.reconnect).await?;
+        let options = Options {
+            timeouts: self.timeouts,
+            reconnect: self.reconnect,
+            limits: self.limits,
+        };
+        let conn = Conn::connect(&self.socket, &self.component, options).await?;
         Ok(Rbus {
             inner: Arc::new(Inner {
                 conn,

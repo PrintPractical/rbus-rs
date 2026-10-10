@@ -6,7 +6,10 @@ use std::fmt;
 /// An rbus status code. Responses carry it as a raw `int32`; [`Status::from_wire`]
 /// interprets it, mapping legacy CCSP codes (100 and up) the way the C library
 /// does. Only current codes are ever sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Two statuses are equal when their codes are, so `Status::Other(5)` equals
+/// the named variant for code 5.
+#[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum Status {
     /// 0: success.
@@ -134,7 +137,11 @@ impl Status {
     pub fn code(self) -> i32 {
         match self {
             Status::Other(c) => c,
-            s => CURRENT.iter().position(|x| *x == s).expect("listed") as i32,
+            // By variant: `==` compares codes, which would recurse.
+            s => CURRENT
+                .iter()
+                .position(|x| std::mem::discriminant(x) == std::mem::discriminant(&s))
+                .expect("listed") as i32,
         }
     }
 
@@ -171,7 +178,21 @@ impl Status {
 
     /// True for [`Status::Success`].
     pub fn is_success(self) -> bool {
-        self == Status::Success
+        self.code() == 0
+    }
+}
+
+impl PartialEq for Status {
+    fn eq(&self, other: &Status) -> bool {
+        self.code() == other.code()
+    }
+}
+
+impl Eq for Status {}
+
+impl std::hash::Hash for Status {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.code().hash(state);
     }
 }
 
@@ -221,6 +242,12 @@ mod tests {
     fn display() {
         assert_eq!(Status::NotWritable.to_string(), "NotWritable (27)");
         assert_eq!(Status::Other(42).to_string(), "unknown status 42");
+        // One code, one status, however it was made.
+        assert_eq!(Status::Other(0), Status::Success);
+        assert!(Status::Other(0).is_success());
+        assert_eq!(Status::Other(5), Status::from_wire(5));
+        let set: std::collections::HashSet<_> = [Status::Other(1), Status::BusError].into();
+        assert_eq!(set.len(), 1);
         assert!(Status::Success.is_success() && !Status::BusError.is_success());
     }
 

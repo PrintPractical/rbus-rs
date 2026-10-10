@@ -24,8 +24,8 @@ pub const TOPIC_REGISTERED_COMPONENTS: &str = "_registered_components";
 pub const TOPIC_ADVISORY: &str = "_RTROUTED.ADVISORY";
 
 /// Encodes a control message as compact JSON.
-pub fn encode<T: Serialize>(msg: &T) -> Vec<u8> {
-    serde_json::to_vec(msg).expect("control messages always serialize")
+pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(msg)?)
 }
 
 /// Decodes a control message. Trailing NULs, which some C builds append, are
@@ -168,6 +168,10 @@ pub struct Advisory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encode<T: Serialize>(msg: &T) -> Vec<u8> {
+        super::encode(msg).unwrap()
+    }
 
     #[test]
     fn routes_match_cjson_output() {

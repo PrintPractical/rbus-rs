@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use bytes::Bytes;
+use rbus_wire::Limits;
 use rbus_wire::control::{self, Route};
 use rbus_wire::event::Event;
 use rbus_wire::frame::{Flags, Frame, FrameDecoder, Header};
@@ -102,6 +103,8 @@ pub(crate) struct Core {
     seq: AtomicU32,
     inbox: String,
     pub(crate) timeouts: Timeouts,
+    /// What the decoders accept from peers.
+    pub(crate) limits: Limits,
     subs: Mutex<HashMap<i32, SubEntry>>,
     next_sub_id: AtomicI32,
     advisory_listeners: Mutex<Vec<Weak<Queue<Advisory>>>>,
@@ -191,7 +194,7 @@ impl Core {
             .map(|route| {
                 let header =
                     Header::new(self.next_seq(), Flags::NONE, control::TOPIC_SUBSCRIBE, "");
-                Ok(Frame::new(header, control::encode(route)).encode()?)
+                Ok(Frame::new(header, control::encode(route)?).encode()?)
             })
             .collect()
     }
@@ -223,7 +226,7 @@ impl Core {
     /// Sends a JSON control message with no flags (no reply expected).
     pub(crate) fn send_control<T: serde::Serialize>(&self, msg: &T) -> Result<()> {
         let header = Header::new(self.next_seq(), Flags::NONE, control::TOPIC_SUBSCRIBE, "");
-        self.queue(&Frame::new(header, control::encode(msg)))
+        self.queue(&Frame::new(header, control::encode(msg)?))
     }
 
     /// Sends a plain rbus message (an event) to `topic`, with our component
@@ -278,7 +281,7 @@ impl Core {
         topic: &str,
         msg: &T,
     ) -> Result<Pending> {
-        self.request(topic, Flags::NONE, control::encode(msg))
+        self.request(topic, Flags::NONE, control::encode(msg)?)
     }
 
     /// Registers for `_RTROUTED.ADVISORY` the first time anything needs it.
@@ -456,7 +459,7 @@ impl Core {
     }
 
     async fn on_event(&self, frame: &Frame) {
-        let decoded = split_event_payload(&frame.payload)
+        let decoded = split_event_payload(&frame.payload, &self.limits)
             .and_then(|(mut body, meta)| Ok((Event::decode(&mut body)?, meta)));
         let (event, meta) = match decoded {
             Ok(e) => e,
@@ -474,6 +477,15 @@ impl Core {
             None => trace!(name = %meta.event_name, "event for no subscription"),
         }
     }
+}
+
+/// How a connection behaves; set through the builder.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Options {
+    pub(crate) timeouts: Timeouts,
+    /// Connect again after losing the broker, on this schedule.
+    pub(crate) reconnect: Option<Retry>,
+    pub(crate) limits: Limits,
 }
 
 /// A connection to rtrouted, registered as one component.
@@ -537,12 +549,12 @@ impl Conn {
     /// component. Registration is fire-and-forget, as in C: the broker handles
     /// a connection's frames in order, so later requests see the routes.
     /// With `reconnect`, a lost socket is replaced (L5).
-    pub(crate) async fn connect(
-        socket: &Path,
-        component: &str,
-        timeouts: Timeouts,
-        reconnect: Option<Retry>,
-    ) -> Result<Conn> {
+    pub(crate) async fn connect(socket: &Path, component: &str, options: Options) -> Result<Conn> {
+        let Options {
+            timeouts,
+            reconnect,
+            limits,
+        } = options;
         let mut stream = connect_socket(socket, timeouts.broker).await?;
         let (state, _) = watch::channel(ConnectionState::Connected);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -555,6 +567,7 @@ impl Conn {
             seq: AtomicU32::new(0),
             inbox: inbox_name(),
             timeouts,
+            limits,
             subs: Mutex::new(HashMap::new()),
             next_sub_id: AtomicI32::new(1),
             advisory_listeners: Mutex::new(Vec::new()),
@@ -850,7 +863,7 @@ async fn reconnect(
 }
 
 async fn reader(mut read: OwnedReadHalf, core: Arc<Core>) {
-    let mut decoder = FrameDecoder::new();
+    let mut decoder = FrameDecoder::with_limits(&core.limits);
     'read: loop {
         match read.read_buf(decoder.buffer_mut()).await {
             Ok(0) => {

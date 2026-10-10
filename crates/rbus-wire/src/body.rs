@@ -54,7 +54,7 @@ impl Body for GetRequest {
     }
     fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let requesting_component = r.str()?;
-        let count = r.i32()?;
+        let count = r.count("names")?;
         let names = (0..count).map(|_| r.str()).collect::<Result<_>>()?;
         Ok(GetRequest {
             requesting_component,
@@ -247,7 +247,7 @@ impl Body for ElementNamesResponse {
         let status = r.i32()?;
         let mut elements = Vec::new();
         if succeeded(status) && !r.is_empty() {
-            for _ in 0..r.i32()? {
+            for _ in 0..r.count("element names")? {
                 elements.push(ElementName {
                     name: r.str()?,
                     element_type: r.i32()?,
@@ -292,7 +292,7 @@ impl Body for RowNamesResponse {
         let status = r.i32()?;
         let mut rows = Vec::new();
         if succeeded(status) && !r.is_empty() {
-            for _ in 0..r.i32()? {
+            for _ in 0..r.count("row names")? {
                 let instance = r.i32()? as u32;
                 let alias = Some(r.str()?).filter(|a| !a.is_empty());
                 rows.push(RowName { instance, alias });
@@ -599,11 +599,6 @@ impl SubscribeResponse {
     }
 }
 
-/// Reads one event message body.
-pub fn decode_event(r: &mut Reader<'_>) -> Result<Event> {
-    Event::decode(r)
-}
-
 /// Fails if a reader still has items after a body was decoded. Useful in
 /// strict contexts such as tests and fixture checks.
 pub fn expect_end(r: &Reader<'_>, what: &'static str) -> Result<()> {
@@ -893,7 +888,7 @@ mod tests {
         }
         .encode(&mut w);
         let b = w.into_bytes();
-        assert_eq!(decode_event(&mut Reader::new(&b)).unwrap().name, "e");
+        assert_eq!(Event::decode(&mut Reader::new(&b)).unwrap().name, "e");
     }
 
     #[test]

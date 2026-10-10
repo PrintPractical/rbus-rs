@@ -126,7 +126,8 @@ impl Peer {
     }
 
     async fn reply_json<T: Serialize>(&mut self, req: &Frame, msg: &T) {
-        self.reply(req, Flags::NONE, control::encode(msg)).await;
+        self.reply(req, Flags::NONE, control::encode(msg).unwrap())
+            .await;
     }
 
     async fn undeliverable(&mut self, req: &Frame) {
@@ -137,7 +138,8 @@ impl Peer {
 
 fn request<B: Body>(frame: &Frame, method: Method) -> B {
     assert_eq!(frame.header.flags, Flags::REQUEST | Flags::RAW_BINARY);
-    let (mut body, meta) = split_method_payload(&frame.payload).unwrap();
+    let (mut body, meta) =
+        split_method_payload(&frame.payload, &rbus_wire::Limits::DEFAULT).unwrap();
     assert_eq!(meta.method, method);
     B::decode(&mut body).unwrap()
 }
@@ -353,6 +355,62 @@ async fn l6_timeout_and_cancellation_leave_no_state() {
     )
     .await;
     assert_eq!(get.await.unwrap().unwrap(), -1);
+}
+
+#[tokio::test]
+async fn limits_apply_to_what_peers_send() {
+    let l = Listener::new();
+    let limits = crate::Limits::default()
+        .with_max_depth(4)
+        .with_max_payload(4096);
+    let (bus, mut peer) = l
+        .connect_with(
+            Rbus::builder("test.component")
+                .timeouts(short())
+                .limits(limits),
+        )
+        .await;
+
+    // A reply nested deeper than allowed fails the call, not the connection.
+    let mut deep = Object::new();
+    for _ in 0..10 {
+        let mut outer = Object::new();
+        outer.children.push(deep);
+        deep = outer;
+    }
+    let get = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.get::<Value>("Device.A").await }
+    });
+    let req = peer.recv().await;
+    peer.reply_rbus(
+        &req,
+        &get_ok(vec![Property::new("Device.A", Value::Object(deep))]),
+    )
+    .await;
+    let got = get.await.unwrap();
+    assert!(
+        matches!(
+            got,
+            Err(Error::Wire(rbus_wire::Error::LimitExceeded {
+                what: "nesting depth",
+                max: 4
+            }))
+        ),
+        "{got:?}"
+    );
+    assert_eq!(*bus.state().borrow(), ConnectionState::Connected);
+
+    // A frame over the payload limit can't be skipped: the socket goes.
+    peer.send(Frame::new(
+        Header::new(1, Flags::RAW_BINARY, bus.inbox(), "x"),
+        vec![0u8; 5000],
+    ))
+    .await;
+    bus.state()
+        .wait_for(|s| *s == ConnectionState::Closed)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

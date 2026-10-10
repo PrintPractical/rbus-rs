@@ -67,6 +67,7 @@ pub use discover::{Advisories, Advisory, Discover};
 pub use error::{Error, Result, Status, TypeError};
 pub use name::{EventName, IntoName, MethodName, Name, NameError, PropertyName, TablePath};
 pub use queue::Overflow;
+pub use rbus_wire::Limits;
 pub use rbus_wire::value::{DateTime, Object, ObjectKind, Property, Value};
 pub use retry::Retry;
 pub use subscribe::{EventError, RowEvent, RowId, SubscribeBuilder, Subscription, ValueChange};

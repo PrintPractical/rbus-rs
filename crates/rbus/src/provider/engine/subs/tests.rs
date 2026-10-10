@@ -24,7 +24,7 @@ impl Outbox for Rec {
     }
     fn send_event(&self, inbox: &str, payload: Vec<u8>) {
         let bytes = Bytes::from(payload);
-        let (mut body, meta) = split_event_payload(&bytes).unwrap();
+        let (mut body, meta) = split_event_payload(&bytes, &rbus_wire::Limits::DEFAULT).unwrap();
         let event = Event::decode(&mut body).unwrap();
         self.sent
             .lock()
@@ -148,7 +148,8 @@ fn req(
 
 fn decode(payload: Vec<u8>, initial: bool) -> SubscribeResponse {
     let bytes = Bytes::from(payload);
-    let (mut body, meta) = rbus_wire::message::split_method_payload(&bytes).unwrap();
+    let (mut body, meta) =
+        rbus_wire::message::split_method_payload(&bytes, &rbus_wire::Limits::DEFAULT).unwrap();
     assert_eq!(meta.method, Method::Response);
     SubscribeResponse::decode_for(&mut body, initial).unwrap()
 }

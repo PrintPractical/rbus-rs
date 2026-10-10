@@ -76,7 +76,8 @@ fn advisory_frame(event: i32, inbox: &str) -> Frame {
     let payload = control::encode(&control::Advisory {
         event,
         inbox: inbox.into(),
-    });
+    })
+    .unwrap();
     Frame::new(
         Header::new(1, Flags::NONE, control::TOPIC_ADVISORY, ""),
         payload,

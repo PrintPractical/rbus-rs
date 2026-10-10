@@ -210,7 +210,7 @@ fn cx() -> Context {
 
 fn decode<B: Body>(payload: Vec<u8>) -> B {
     let bytes = Bytes::from(payload);
-    let (mut body, meta) = split_method_payload(&bytes).unwrap();
+    let (mut body, meta) = split_method_payload(&bytes, &rbus_wire::Limits::DEFAULT).unwrap();
     assert_eq!(meta.method, Method::Response);
     B::decode(&mut body).unwrap()
 }

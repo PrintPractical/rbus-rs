@@ -10,9 +10,11 @@ pub mod control;
 pub mod error;
 pub mod event;
 pub mod frame;
+pub mod limits;
 pub mod message;
 pub mod msgpack;
 pub mod status;
 pub mod value;
 
 pub use error::{Error, Result};
+pub use limits::Limits;

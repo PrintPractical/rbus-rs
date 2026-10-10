@@ -1,6 +1,6 @@
 //! [`Value`] → `Deserialize`.
 
-use rbus_wire::value::{DateTime, Object, ObjectKind, Property, Value};
+use rbus_wire::value::{DateTime, Object, ObjectKind, Property, TypeTag, Value};
 use serde::de::{self, DeserializeSeed, IntoDeserializer, Visitor};
 
 use crate::error::{TypeError, kind_of};
@@ -95,26 +95,27 @@ fn property_entries(list: Vec<Property>) -> Vec<(String, Node)> {
 }
 
 fn variant_name(v: &Value) -> &'static str {
-    match v {
-        Value::Bool(_) => "Bool",
-        Value::Char(_) => "Char",
-        Value::Byte(_) => "Byte",
-        Value::I8(_) => "I8",
-        Value::U8(_) => "U8",
-        Value::I16(_) => "I16",
-        Value::U16(_) => "U16",
-        Value::I32(_) => "I32",
-        Value::U32(_) => "U32",
-        Value::I64(_) => "I64",
-        Value::U64(_) => "U64",
-        Value::F32(_) => "F32",
-        Value::F64(_) => "F64",
-        Value::DateTime(_) => "DateTime",
-        Value::String(_) => "String",
-        Value::Bytes(_) => "Bytes",
-        Value::Properties(_) => "Properties",
-        Value::Object(_) => "Object",
-        Value::None => "None",
+    // By tag, which rbus matches exhaustively; `Value` is non-exhaustive.
+    match v.type_tag() {
+        TypeTag::Bool => "Bool",
+        TypeTag::Char => "Char",
+        TypeTag::Byte => "Byte",
+        TypeTag::I8 => "I8",
+        TypeTag::U8 => "U8",
+        TypeTag::I16 => "I16",
+        TypeTag::U16 => "U16",
+        TypeTag::I32 => "I32",
+        TypeTag::U32 => "U32",
+        TypeTag::I64 => "I64",
+        TypeTag::U64 => "U64",
+        TypeTag::F32 => "F32",
+        TypeTag::F64 => "F64",
+        TypeTag::DateTime => "DateTime",
+        TypeTag::String => "String",
+        TypeTag::Bytes => "Bytes",
+        TypeTag::Properties => "Properties",
+        TypeTag::Object => "Object",
+        TypeTag::None => "None",
     }
 }
 
@@ -142,6 +143,10 @@ impl Node {
             }
             Value::Object(o) => visitor.visit_map(Entries::new(object_entries(o))),
             Value::None => visitor.visit_unit(),
+            other => Err(TypeError::Custom(format!(
+                "no serde form for {} values",
+                variant_name(&other)
+            ))),
         }
     }
 }
@@ -163,8 +168,8 @@ impl<'de> de::Deserializer<'de> for Node {
             Node::ValueEnum(v) => visitor.visit_enum(ValueEnum(v)),
             Node::Object(o) => {
                 let kind = match o.kind {
-                    ObjectKind::Single => "Single",
                     ObjectKind::MultiInstance => "MultiInstance",
+                    _ => "Single",
                 };
                 visitor.visit_map(Entries::new(vec![
                     ("name".into(), Node::Natural(Value::String(o.name))),

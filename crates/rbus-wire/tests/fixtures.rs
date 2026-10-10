@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use bytes::Bytes;
+use rbus_wire::Limits;
 use rbus_wire::body::*;
 use rbus_wire::control::{
     self, DiscoveryReply, Expression, NameList, RegisteredComponents, ResultReply, Route,
@@ -109,7 +110,7 @@ fn every_recorded_frame_round_trips() {
             }
 
             if h.flags.contains(Flags::REQUEST) {
-                let (mut r, meta) = split_method_payload(p).unwrap();
+                let (mut r, meta) = split_method_payload(p, &Limits::DEFAULT).unwrap();
                 let mut note = Pending {
                     method: meta.method.clone(),
                     publish_on_subscribe: false,
@@ -153,7 +154,7 @@ fn every_recorded_frame_round_trips() {
             }
 
             if h.flags.contains(Flags::RESPONSE) {
-                let (mut r, meta) = split_method_payload(p).unwrap();
+                let (mut r, meta) = split_method_payload(p, &Limits::DEFAULT).unwrap();
                 assert_eq!(meta.method, Method::Response, "{ctx}");
                 let req = pending
                     .get(&(h.topic.clone(), h.seq))
@@ -207,7 +208,7 @@ fn every_recorded_frame_round_trips() {
             }
 
             // Neither request nor response: an event.
-            let (mut r, meta) = split_event_payload(p).unwrap();
+            let (mut r, meta) = split_event_payload(p, &Limits::DEFAULT).unwrap();
             let event = Event::decode(&mut r).unwrap_or_else(|e| panic!("{ctx}: {e}"));
             expect_end(&r, "event").unwrap();
             assert!(meta.rbus2, "{ctx}");
@@ -300,6 +301,7 @@ fn check_control(ctx: &str, topic: &str, flags: Flags, payload: &Bytes) {
             other => panic!("{ctx}: unexpected control topic {other}"),
         }
     };
+    let re = re.unwrap();
     assert_eq!(&re[..], &payload[..], "{ctx}: control re-encode");
 }
 
@@ -322,7 +324,7 @@ fn recorded_values_decode_to_expected_rust_values() {
         })
         .next()
         .expect("the all-types response");
-    let (mut r, _) = split_method_payload(&resp).unwrap();
+    let (mut r, _) = split_method_payload(&resp, &Limits::DEFAULT).unwrap();
     let get = GetResponse::decode(&mut r).unwrap();
     let by_name: HashMap<_, _> = get
         .properties

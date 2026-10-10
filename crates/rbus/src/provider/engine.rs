@@ -905,7 +905,7 @@ fn error_output(mut output: Object, status: Status, text: String) -> Object {
 
 /// Serves one inbound request and sends the response. Runs as its own task.
 pub(crate) async fn serve(core: Arc<Core>, frame: Frame) {
-    let decoded = split_method_payload(&frame.payload)
+    let decoded = split_method_payload(&frame.payload, &core.limits)
         .map(|(mut body, meta)| (Request::decode(&meta.method, &mut body), meta.method));
     let (request, method) = match decoded {
         Ok(d) => d,

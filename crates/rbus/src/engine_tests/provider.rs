@@ -56,7 +56,8 @@ fn inbound(seq: u32, topic: &str, method: Method, body: &impl Body) -> Frame {
 }
 
 fn decode<B: Body>(frame: &Frame) -> B {
-    let (mut body, meta) = split_method_payload(&frame.payload).unwrap();
+    let (mut body, meta) =
+        split_method_payload(&frame.payload, &rbus_wire::Limits::DEFAULT).unwrap();
     assert_eq!(meta.method, Method::Response);
     B::decode(&mut body).unwrap()
 }
