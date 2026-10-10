@@ -244,7 +244,7 @@ Every feature has integration tests against the real broker.
   - the element-info browsing API;
   - the C timeout environment variables and override files.
 - **Per-call timeouts:** use `tokio::time::timeout`. Dropping a request future cancels it and leaves nothing behind. A `set_many` that spans several providers goes to them one at a time, so cancelling it part-way can leave the earlier ones' sets applied.
-- **Planned after 0.1:**
+- **Planned for later releases:**
   - parsing values from strings;
   - consumer-side event filters;
   - multiplexed event streams;

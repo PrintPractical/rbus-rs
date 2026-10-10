@@ -1,5 +1,5 @@
-//! What a provider can see of its subscribers (P8), and where their state can
-//! be kept (D11).
+//! What a provider can see of its subscribers, and where their state can
+//! be kept.
 
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -25,7 +25,7 @@ pub struct SubscriberInfo {
     pub inbox: String,
     /// The consumer's component id, echoed in every event.
     pub component_id: i32,
-    /// The consumer's filter, for value-change subscriptions (P12).
+    /// The consumer's filter, for value-change subscriptions.
     pub filter: Option<Filter>,
     /// The id the engine gave the subscription.
     pub id: u32,
@@ -116,10 +116,10 @@ impl std::fmt::Debug for SubscriptionEvents {
     }
 }
 
-/// Keeps a provider's subscribers across restarts (D11). The engine calls
+/// Keeps a provider's subscribers across restarts. The engine calls
 /// [`SubscriberStore::save`] after every change and
 /// [`SubscriberStore::load`] when the provider is registered. The default,
-/// [`NoStore`], keeps nothing; a crash-recovery store (P17) plugs in here.
+/// [`NoStore`], keeps nothing; a crash-recovery store plugs in here.
 pub trait SubscriberStore: Send + Sync + 'static {
     /// Records the provider's current subscribers.
     fn save(&self, subscribers: &[SubscriberInfo]);

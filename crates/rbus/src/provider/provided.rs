@@ -22,7 +22,7 @@ use crate::types::IntoValue;
 
 impl Rbus {
     /// Registers `provider` and serves its data model until the returned
-    /// [`Provided`] is dropped (P1, P3).
+    /// [`Provided`] is dropped.
     ///
     /// ```no_run
     /// # async fn demo(bus: rbus::Rbus, model: impl rbus::provider::Provider) -> rbus::Result<()> {
@@ -79,7 +79,7 @@ impl<P: Provider> Provide<P> {
     }
 
     /// Keeps the provider's subscribers in `store`, so they survive a
-    /// restart (D11). Subscribers it held are restored at registration,
+    /// restart. Subscribers it held are restored at registration,
     /// unless their process is gone. The default keeps nothing.
     pub fn subscriber_store(mut self, store: impl SubscriberStore) -> Self {
         self.store = Arc::new(store);
@@ -150,7 +150,7 @@ impl<P: Provider> IntoFuture for Provide<P> {
     }
 }
 
-/// A registered provider (P3). Derefs to the provider. Dropping it removes
+/// A registered provider. Derefs to the provider. Dropping it removes
 /// its names from the broker and its rows from the engine.
 ///
 /// It holds a clone of the [`Rbus`] it was registered on, so the connection
@@ -222,7 +222,7 @@ impl<P> Provided<P> {
         self.handle.rows(table)
     }
 
-    /// Publishes a general event to its subscribers (P4); see
+    /// Publishes a general event to its subscribers; see
     /// [`Handle::publish`].
     ///
     /// ```no_run
@@ -241,7 +241,7 @@ impl<P> Provided<P> {
     }
 
     /// Publishes a change of a property's value that the provider made
-    /// itself (P9); see [`Handle::publish_value_change`].
+    /// itself; see [`Handle::publish_value_change`].
     pub fn publish_value_change(
         &self,
         property: impl IntoName<PropertyName>,
@@ -257,13 +257,13 @@ impl<P> Provided<P> {
         self.handle.notify_changed(property).await
     }
 
-    /// The current subscribers to this provider's elements (P8); see
+    /// The current subscribers to this provider's elements; see
     /// [`Handle::subscribers`].
     pub fn subscribers(&self, name: Option<&str>) -> Vec<SubscriberInfo> {
         self.handle.subscribers(name)
     }
 
-    /// A stream of consumers subscribing and unsubscribing (P8). It ends
+    /// A stream of consumers subscribing and unsubscribing. It ends
     /// when this `Provided` is dropped.
     pub fn subscription_events(&self) -> SubscriptionEvents {
         self.handle.subscription_events()

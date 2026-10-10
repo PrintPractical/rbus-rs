@@ -1,4 +1,4 @@
-//! Tables as a consumer: add, remove and list rows (T1–T3).
+//! Tables as a consumer: add, remove and list rows.
 
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
@@ -113,7 +113,7 @@ impl RemoteTable {
         self.path.as_ref().map_err(|e| Error::Name(e.clone()))
     }
 
-    /// Adds a row (T1). Await the builder; set an alias with `.alias(..)`.
+    /// Adds a row. Await the builder; set an alias with `.alias(..)`.
     pub fn add_row(&self) -> AddRow<'_> {
         AddRow {
             table: self,
@@ -121,7 +121,7 @@ impl RemoteTable {
         }
     }
 
-    /// Removes a row by instance number or alias (T2).
+    /// Removes a row by instance number or alias.
     pub async fn remove_row(&self, row: impl Into<RowRef>) -> Result<()> {
         let path = self.path()?;
         let row_name = match row.into() {
@@ -147,7 +147,7 @@ impl RemoteTable {
         check(resp.status, &row_name)
     }
 
-    /// The table's rows: instance numbers and aliases (T3).
+    /// The table's rows: instance numbers and aliases.
     pub async fn rows(&self) -> Result<Vec<RowId>> {
         let path = self.path()?;
         let body = NamesRequest {

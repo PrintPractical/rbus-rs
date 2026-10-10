@@ -1,4 +1,4 @@
-//! M3 engine tests: subscriptions, advisories, resubscription, trees, tables
+//! Consumer engine tests: subscriptions, advisories, resubscription, trees, tables
 //! and discovery against the scripted socket.
 
 use std::time::Duration;
@@ -488,7 +488,7 @@ async fn subscribe_failures_and_retry() {
     peer.undeliverable(&req).await;
     assert!(matches!(sub.await.unwrap(), Err(Error::NotFound(_))));
 
-    // With retry: the provider appears on the third attempt (E10).
+    // With retry: the provider appears on the third attempt.
     let retry = Retry::exponential()
         .initial(Duration::from_millis(5))
         .max_delay(Duration::from_millis(10))

@@ -3,25 +3,23 @@ resolver = "3"
 members = ["crates/rbus-wire", "crates/rbus", "crates/rbus-macros", "crates/rbus-testkit"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.85"
 repository = "https://github.com/PrintPractical/rbus-rs"
 license = "Apache-2.0"
 keywords = ["rdk", "rbus", "rtrouted", "tr-181", "ipc"]
 categories = ["network-programming", "asynchronous", "embedded"]
-# The owner flips this for a release; CI's package job flips it in its own
-# checkout to verify the tarballs.
-publish = false
+publish = true
 
 # Every dependency is declared once, here; crates add features on top.
 # The internal crates carry a version too, for publishing. rbus-macros is
 # pinned exactly: its output names rbus internals that only match the same
 # release.
 [workspace.dependencies]
-rbus-macros = { path = "crates/rbus-macros", version = "=0.0.0" }
+rbus-macros = { path = "crates/rbus-macros", version = "=0.0.1" }
 rbus-testkit = { path = "crates/rbus-testkit" }
-rbus-wire = { path = "crates/rbus-wire", version = "0.0.0" }
+rbus-wire = { path = "crates/rbus-wire", version = "0.0.1" }
 
 bytes = "1"
 futures-core = "0.3"

@@ -256,7 +256,7 @@ mod time_impl {
         TypeError::Custom(format!("invalid RBUS datetime: {what}"))
     }
 
-    /// `RBUS_DATETIME` (V2). Fractional seconds are dropped. The day of the week
+    /// `RBUS_DATETIME`. Fractional seconds are dropped. The day of the week
     /// and of the year are recomputed from the date on output, and ignored on input.
     impl IntoValue for OffsetDateTime {
         fn into_value(self) -> Value {

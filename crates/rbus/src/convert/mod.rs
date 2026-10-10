@@ -1,4 +1,4 @@
-//! serde ↔ bus values (V6).
+//! serde ↔ bus values.
 //!
 //! Any `Serialize` type maps to an rbus [`Object`]; any `Deserialize` type can
 //! be read back from one. This is how method arguments and results, and event

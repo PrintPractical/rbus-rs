@@ -24,7 +24,7 @@ struct InstanceCount {
     got: usize,
 }
 
-/// The request a handler is serving (P7).
+/// The request a handler is serving.
 ///
 /// ```
 /// # use rbus::provider::{Context, Fault};
@@ -152,11 +152,11 @@ impl Change {
     }
 }
 
-/// The parameters of one set request, delivered together (C7, D8).
+/// The parameters of one set request, delivered together.
 ///
 /// Names, writability and row existence are already checked against the
 /// schema. Apply all of them or none: return a [`SetFault`] naming the
-/// parameter that failed, and the consumer sees which one (C9).
+/// parameter that failed, and the consumer sees which one.
 ///
 /// ```
 /// # use rbus::provider::{Context, SetFault, Transaction};

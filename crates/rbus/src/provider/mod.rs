@@ -44,13 +44,13 @@
 //! - **Names.** Partial paths (`Device.WiFi.`), wildcards (`Device.Host.*.Name`)
 //!   and aliases (`Host.[lan].Name`) are resolved against the schema and the
 //!   table rows, so [`Provider::get`] only ever sees a single property with
-//!   instance numbers (PT8).
+//!   instance numbers.
 //! - **Rows.** The engine keeps each table's rows. Consumers add and remove
 //!   rows through [`Provider::add_row`] and [`Provider::remove_row`]; the
-//!   provider adds its own with [`Provided::add_row`] (PT2, PT3).
+//!   provider adds its own with [`Provided::add_row`].
 //! - **Checks.** Unknown names, sets of read-only properties and calls to
 //!   missing rows are answered from the schema, before the provider runs.
-//! - **Concurrency.** Every request runs as its own task (P2), unless the
+//! - **Concurrency.** Every request runs as its own task, unless the
 //!   provider is registered [`serialized`](Provide::serialized).
 //!
 //! ```no_run
@@ -73,7 +73,7 @@
 //! # async fn demo() -> rbus::Result<()> {
 //! let bus = Rbus::connect("com.example.counter").await?;
 //! let counter = bus.provide(Counter(AtomicU32::new(0))).await?;   // Provided<Counter>
-//! // ... dropping `counter` unregisters it (P3).
+//! // ... dropping `counter` unregisters it.
 //! # Ok(()) }
 //! ```
 
@@ -168,7 +168,7 @@ pub trait Provider: Send + Sync + 'static {
         async { Err(Fault::invalid_method()) }
     }
 
-    /// A consumer adds a row to a [`Rows::Dynamic`] table (PT2). Return the
+    /// A consumer adds a row to a [`Rows::Dynamic`] table. Return the
     /// new row's instance number; the engine records the row with its alias.
     /// An alias already in use is refused before this is called.
     fn add_row(

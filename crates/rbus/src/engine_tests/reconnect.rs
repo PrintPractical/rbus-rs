@@ -1,4 +1,4 @@
-//! L5 engine tests: losing the broker and connecting again.
+//! Reconnect engine tests: losing the broker and connecting again.
 
 use std::collections::BTreeSet;
 use std::time::Duration;

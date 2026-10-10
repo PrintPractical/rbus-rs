@@ -43,6 +43,29 @@ RTROUTED_LOG_LEVEL=DEBUG scripts/interop.sh ...
 
 Interop tests are marked `#[ignore = "needs rtrouted: run scripts/interop.sh"]`. Use `rbus_testkit::broker::Peer` to start C peers (killed on drop). Never send zero-length payloads: rtrouted stalls on them (D20).
 
+## Releasing
+
+`rbus`, `rbus-wire` and `rbus-macros` are published together at one version. `rbus-testkit` is never published.
+
+- **Published docs must stand alone.** `docs/` isn't published, so never cite it from `crates/*/src`, examples or READMEs. That includes design-doc section numbers and decision, feature or milestone IDs (D12, E3, PT9, M5). Test names under `crates/rbus/tests` keep their feature IDs, because those tests aren't published.
+- **Release PR** on a `release/X.Y.Z` branch:
+  1. Bump `[workspace.package] version`, plus the internal crates' versions in `[workspace.dependencies]`. `rbus-macros` is pinned exactly (`=X.Y.Z`) because its output names `rbus` internals.
+  2. Add a `CHANGELOG.md` entry.
+  3. Run the checks under Commands, then `cargo publish --workspace --exclude rbus-testkit --dry-run`.
+  4. CI must pass in full, including the interop job and its coverage gate.
+- **Publish** only when the owner says so. A crates.io version can't be deleted or replaced, only yanked. From a clean checkout of the merge commit on `main`:
+
+  ```sh
+  git tag -a vX.Y.Z -m "rbus X.Y.Z" && git push origin vX.Y.Z
+  cargo publish --workspace --exclude rbus-testkit
+  ```
+
+- **Afterwards:**
+  - create a GitHub Release from the tag, with the CHANGELOG entry;
+  - check that docs.rs builds all three crates;
+  - tick the release in `docs/ROADMAP.md`.
+- While the version is `0.0.x`, Cargo treats every release as breaking.
+
 ## Layout
 
 - `crates/rbus-wire`: framing, msgpack payloads, value records, JSON control. Sans-I/O.

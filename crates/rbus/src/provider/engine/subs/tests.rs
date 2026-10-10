@@ -203,7 +203,7 @@ async fn p9_a_set_publishes_the_change_to_each_subscriber() {
     .await;
     assert_eq!((resp.status, resp.subscription_id), (0, Some(3)));
     assert!(out.watching.load(AtomicOrdering::Relaxed));
-    // The same subscription again is refused, as C does (D29, D35).
+    // The same subscription again is refused, as C does.
     let again = sub(
         &r,
         &out,

@@ -1,4 +1,4 @@
-//! Subscriptions as typed streams (E1–E5, E9, E10, D12).
+//! Subscriptions as typed streams.
 //!
 //! The kind of element decides the item type:
 //!
@@ -46,7 +46,7 @@ const DEFAULT_BUFFER: usize = 256;
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum EventError {
-    /// The consumer fell behind and this many events were dropped (D12).
+    /// The consumer fell behind and this many events were dropped.
     #[error("{0} events were dropped because the consumer fell behind")]
     Lagged(u64),
     /// An event arrived that doesn't convert to the stream's item type.
@@ -59,8 +59,8 @@ pub enum EventError {
     },
 }
 
-/// A property's new value (E3), or its current value when the subscription
-/// asked for one (E9).
+/// A property's new value, or its current value when the subscription
+/// asked for one.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ValueChange<T> {
@@ -74,7 +74,7 @@ pub struct ValueChange<T> {
     pub by: Option<String>,
 }
 
-/// A row added to or removed from a table (E4).
+/// A row added to or removed from a table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RowEvent {
@@ -259,7 +259,7 @@ async fn unsubscribe_once(core: &Arc<Core>, name: &str, id: i32) -> Result<()> {
 }
 
 /// Sends an unsubscribe for every live subscription without waiting for the
-/// replies, and forgets them (L13).
+/// replies, and forgets them.
 pub(crate) fn unsubscribe_all(core: &Arc<Core>) {
     for (id, name) in core.sub_names() {
         core.remove_sub(id);
@@ -269,7 +269,7 @@ pub(crate) fn unsubscribe_all(core: &Arc<Core>) {
 
 /// Re-sends every subscription after a connect advisory. Providers that still
 /// have one answer "already exists", which is fine; providers that are still
-/// registering their elements are retried for a while (D11).
+/// registering their elements are retried for a while.
 pub(crate) async fn resubscribe_all(core: &Arc<Core>) {
     let mut todo = core.sub_names();
     if todo.is_empty() {
@@ -307,7 +307,7 @@ pub(crate) async fn resubscribe_all(core: &Arc<Core>) {
 }
 
 impl Rbus {
-    /// Subscribes to a property's value changes (E3). The provider detects the
+    /// Subscribes to a property's value changes. The provider detects the
     /// changes.
     ///
     /// ```no_run
@@ -331,7 +331,7 @@ impl Rbus {
         SubscribeBuilder::new(self, name.into_name().map(Name::from), decode_value::<T>)
     }
 
-    /// Subscribes to rows being added to and removed from a table (E4).
+    /// Subscribes to rows being added to and removed from a table.
     pub fn subscribe_table(
         &self,
         table: impl IntoName<TablePath>,
@@ -339,7 +339,7 @@ impl Rbus {
         SubscribeBuilder::new(self, table.into_name().map(Name::from), decode_row)
     }
 
-    /// Subscribes to a provider-defined event (E5); its data is decoded into
+    /// Subscribes to a provider-defined event; its data is decoded into
     /// `T` with serde. Use [`crate::Object`] to take it as it comes.
     pub fn subscribe<T: DeserializeOwned + 'static>(
         &self,
@@ -387,7 +387,7 @@ impl<'a, I> SubscribeBuilder<'a, I> {
         }
     }
 
-    /// Keep trying while no provider owns the name (E10). Without this, a
+    /// Keep trying while no provider owns the name. Without this, a
     /// missing provider fails with [`Error::NotFound`].
     pub fn retry(mut self, retry: Retry) -> Self {
         self.retry = Some(retry);
@@ -409,7 +409,7 @@ impl<'a, I> SubscribeBuilder<'a, I> {
 }
 
 impl<T> SubscribeBuilder<'_, ValueChange<T>> {
-    /// Make the current value the first item (E9).
+    /// Make the current value the first item.
     pub fn initial_value(mut self) -> Self {
         self.initial = true;
         self
@@ -511,7 +511,7 @@ impl<'a, I: Send + 'static> IntoFuture for SubscribeBuilder<'a, I> {
 }
 
 /// A stream of events from one subscription. Ends when the connection closes.
-/// Dropping it unsubscribes (E2).
+/// Dropping it unsubscribes.
 ///
 /// It implements [`Stream`]; [`Subscription::next`] works without importing
 /// a stream extension trait.
@@ -548,7 +548,7 @@ impl<I> Subscription<I> {
         })
     }
 
-    /// Unsubscribes and waits for the provider to confirm (E2).
+    /// Unsubscribes and waits for the provider to confirm.
     pub async fn unsubscribe(mut self) -> Result<()> {
         self.active = false;
         let core = &self.bus.inner.conn;

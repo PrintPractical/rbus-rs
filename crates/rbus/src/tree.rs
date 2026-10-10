@@ -1,4 +1,4 @@
-//! Partial-path and wildcard gets (C3, C4) with per-component failures (C5).
+//! Partial-path and wildcard gets with per-component failures.
 
 use indexmap::IndexMap;
 use rbus_wire::body::{GetRequest, GetResponse};
@@ -13,7 +13,7 @@ use crate::discover::Route;
 use crate::error::{Error, Result, Status, TypeError};
 use crate::name::{IntoName, Name};
 
-/// A component whose part of a [`Tree`] could not be read (C5).
+/// A component whose part of a [`Tree`] could not be read.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct TreeFailure {
@@ -24,7 +24,7 @@ pub struct TreeFailure {
 }
 
 /// The values under a partial path or matching a wildcard, from every
-/// component that owns some of them (C3, C4).
+/// component that owns some of them.
 ///
 /// On the wire a partial-path get returns a flat list of properties. A `Tree`
 /// keeps that list ([`Tree::iter`]) and can rebuild the hierarchy below its
@@ -77,7 +77,7 @@ impl Tree {
             .map(|p| &p.value)
     }
 
-    /// Components that failed; their values are missing (C5).
+    /// Components that failed; their values are missing.
     pub fn failures(&self) -> &[TreeFailure] {
         &self.failures
     }
@@ -189,7 +189,7 @@ impl Node {
 impl Rbus {
     /// Gets every value under a partial path (`Device.WiFi.`) or matching a
     /// wildcard (`Device.IP.Interface.*.Status`), with one request per
-    /// owning component, all in flight at once (C3, C4).
+    /// owning component, all in flight at once.
     ///
     /// ```no_run
     /// # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
@@ -203,7 +203,7 @@ impl Rbus {
     /// ```
     ///
     /// A component that fails is reported in [`Tree::failures`] while the
-    /// others' values are kept (C5); the call fails only if every component
+    /// others' values are kept; the call fails only if every component
     /// fails, or none owns the path ([`Error::NotFound`]).
     pub async fn get_tree(&self, path: impl IntoName<Name>) -> Result<Tree> {
         let path = path.into_name()?;

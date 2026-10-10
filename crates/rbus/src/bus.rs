@@ -18,7 +18,7 @@ use rbus_wire::Limits;
 /// The broker socket C clients use by default (`rbuscore.c:322`).
 pub const DEFAULT_SOCKET: &str = "/tmp/rtrouted";
 
-/// Default timeouts per operation (L6). The defaults match the C library's.
+/// Default timeouts per operation. The defaults match the C library's.
 ///
 /// ```
 /// use std::time::Duration;
@@ -186,7 +186,7 @@ impl Rbus {
     }
 
     /// Unregisters from the broker and closes the connection, for every clone
-    /// of this handle (L13). Later calls fail with [`crate::Error::Disconnected`].
+    /// of this handle. Later calls fail with [`crate::Error::Disconnected`].
     /// Closing twice is fine.
     pub async fn close(&self) -> Result<()> {
         self.inner.conn.close(self.inner.timeouts.broker).await
@@ -215,25 +215,25 @@ pub struct RbusBuilder {
 }
 
 impl RbusBuilder {
-    /// The broker's unix socket (L1). Defaults to [`DEFAULT_SOCKET`].
+    /// The broker's unix socket. Defaults to [`DEFAULT_SOCKET`].
     pub fn socket(mut self, path: impl Into<PathBuf>) -> Self {
         self.socket = path.into();
         self
     }
 
-    /// One timeout for every operation (L6).
+    /// One timeout for every operation.
     pub fn default_timeout(mut self, timeout: Duration) -> Self {
         self.timeouts = Timeouts::uniform(timeout);
         self
     }
 
-    /// Per-operation timeouts (L6).
+    /// Per-operation timeouts.
     pub fn timeouts(mut self, timeouts: Timeouts) -> Self {
         self.timeouts = timeouts;
         self
     }
 
-    /// Reconnects on `retry`'s schedule when the broker goes away (L5),
+    /// Reconnects on `retry`'s schedule when the broker goes away,
     /// instead of closing. The first attempt is immediate.
     ///
     /// On the new connection, the component, every element of every
