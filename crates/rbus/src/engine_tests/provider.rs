@@ -11,7 +11,7 @@ use super::{Listener, Peer, short};
 use crate::provider::{Access, Context, Fault, Provider, Rows, Schema};
 use crate::{Error, PropertyName, Status};
 
-struct Model;
+pub(super) struct Model;
 
 impl Provider for Model {
     fn schema(&self) -> Schema {
@@ -27,7 +27,7 @@ impl Provider for Model {
 }
 
 /// Reads one alias registration and checks it.
-async fn expect_alias(peer: &mut Peer, add: i32, name: &str, route: u32) -> Frame {
+pub(super) async fn expect_alias(peer: &mut Peer, add: i32, name: &str, route: u32) -> Frame {
     let f = peer.recv().await;
     assert_eq!(f.header.topic, control::TOPIC_SUBSCRIBE);
     let r: Route = control::decode(&f.payload).unwrap();
@@ -41,7 +41,7 @@ async fn expect_alias(peer: &mut Peer, add: i32, name: &str, route: u32) -> Fram
     f
 }
 
-const NAMES: [&str; 3] = ["Device.M.Value", "Device.M.T.{i}.", "Device.M.Do()"];
+pub(super) const NAMES: [&str; 3] = ["Device.M.Value", "Device.M.T.{i}.", "Device.M.Do()"];
 
 /// A request as the broker forwards it from a consumer's inbox.
 fn inbound(seq: u32, topic: &str, method: Method, body: &impl Body) -> Frame {

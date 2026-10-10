@@ -58,7 +58,8 @@ pub enum Error {
         op: &'static str,
     },
 
-    /// The connection to the broker is closed.
+    /// The connection to the broker is closed, or was lost and is being made
+    /// again (see [`crate::ConnectionState`]).
     #[error("disconnected from broker")]
     Disconnected,
 

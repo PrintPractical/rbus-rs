@@ -266,3 +266,81 @@ impl Drop for Peer {
         let _ = self.child.wait();
     }
 }
+
+/// Set by `tests/interop/run.sh` for the pass that runs the broker-restart
+/// tests on their own.
+pub const RESTART_ENV: &str = "RBUS_BROKER_RESTART";
+
+/// Kills the running `rtrouted` and starts a new one on the same socket (L5).
+///
+/// Every client of the broker loses its connection, so this only works in
+/// tests that run alone: their names contain `broker_restart`, which
+/// `run.sh` skips in the main pass and runs afterwards, one at a time, with
+/// [`RESTART_ENV`] set. Panics anywhere else.
+pub fn restart_broker() {
+    assert!(
+        std::env::var_os(RESTART_ENV).is_some(),
+        "broker-restart tests run alone, after the rest: use scripts/interop.sh"
+    );
+    stop_broker();
+    start_broker();
+}
+
+/// Kills `rtrouted` and waits until its socket refuses connections.
+pub fn stop_broker() {
+    let status = Command::new("pkill")
+        .args(["-x", "rtrouted"])
+        .status()
+        .expect("run pkill");
+    assert!(status.success(), "no rtrouted to stop");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while UnixStream::connect(broker_socket()).is_ok() {
+        assert!(Instant::now() < deadline, "rtrouted did not stop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Starts `rtrouted` in the foreground of a child process that outlives the
+/// test, as `run.sh` does, and waits for its socket. Its log goes to
+/// `/tmp/rtrouted.log`.
+#[allow(
+    clippy::zombie_processes,
+    reason = "the broker outlives the test; the container reaps it"
+)]
+pub fn start_broker() {
+    let socket = broker_socket();
+    let level = std::env::var("RTROUTED_LOG_LEVEL").unwrap_or_else(|_| "ERROR".into());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        // A killed rtrouted leaves its socket file behind, and a new one
+        // doesn't retry a failed bind on a unix socket: it would run with no
+        // listener at all (`rtrouteBase.c:115-128`).
+        let _ = std::fs::remove_file(&socket);
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/rtrouted.log")
+            .expect("open the broker log");
+        let mut child = Command::new("rtrouted")
+            .args(["-f", "-l", &level, "-s"])
+            .arg(format!("unix://{}", socket.display()))
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().expect("clone the log handle"))
+            .stderr(log)
+            .spawn()
+            .expect("spawn rtrouted");
+        while Instant::now() < deadline {
+            if UnixStream::connect(&socket).is_ok() {
+                return;
+            }
+            // The old broker's pid-file lock may not be released yet; it
+            // exits at once then, and is started again.
+            if child.try_wait().expect("poll rtrouted").is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(Instant::now() < deadline, "rtrouted did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

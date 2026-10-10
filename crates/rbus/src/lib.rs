@@ -45,6 +45,7 @@ mod error;
 pub mod name;
 pub mod provider;
 mod queue;
+mod retry;
 mod subscribe;
 mod table;
 mod tree;
@@ -52,6 +53,11 @@ mod types;
 
 #[cfg(test)]
 mod engine_tests;
+
+// The README's examples compile as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;
 
 pub use bus::{DEFAULT_SOCKET, Rbus, RbusBuilder, Timeouts};
 pub use conn::ConnectionState;
@@ -62,9 +68,8 @@ pub use error::{Error, Result, Status, TypeError};
 pub use name::{EventName, IntoName, MethodName, Name, NameError, PropertyName, TablePath};
 pub use queue::Overflow;
 pub use rbus_wire::value::{DateTime, Object, ObjectKind, Property, Value};
-pub use subscribe::{
-    EventError, Retry, RowEvent, RowId, SubscribeBuilder, Subscription, ValueChange,
-};
+pub use retry::Retry;
+pub use subscribe::{EventError, RowEvent, RowId, SubscribeBuilder, Subscription, ValueChange};
 pub use table::{AddRow, RowRef, Table};
 pub use tree::{Tree, TreeFailure};
 pub use types::{IntoValue, RbusType};

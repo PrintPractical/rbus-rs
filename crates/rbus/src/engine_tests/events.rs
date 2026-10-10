@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// The advisory route is registered once, before the first subscription.
-async fn expect_advisory_route(peer: &mut Peer) {
+pub(super) async fn expect_advisory_route(peer: &mut Peer) {
     let f = peer.recv().await;
     assert_eq!(f.header.topic, control::TOPIC_SUBSCRIBE);
     let route: Route = control::decode(&f.payload).unwrap();
@@ -32,14 +32,14 @@ async fn expect_advisory_route(peer: &mut Peer) {
     );
 }
 
-async fn reply_subscribe(peer: &mut Peer, req: &Frame, resp: SubscribeResponse) {
+pub(super) async fn reply_subscribe(peer: &mut Peer, req: &Frame, resp: SubscribeResponse) {
     let mut w = Writer::new();
     resp.encode(&mut w);
     let payload = w.finish_with_meta(|m| MethodMeta::response().encode(m));
     peer.reply(req, Flags::RAW_BINARY, payload).await;
 }
 
-fn subscribed(id: i32) -> SubscribeResponse {
+pub(super) fn subscribed(id: i32) -> SubscribeResponse {
     SubscribeResponse {
         status: 0,
         initial: InitialValue::NotRequested,
@@ -47,7 +47,7 @@ fn subscribed(id: i32) -> SubscribeResponse {
     }
 }
 
-fn event_frame(to: &str, routing: &str, ev: Event) -> Frame {
+pub(super) fn event_frame(to: &str, routing: &str, ev: Event) -> Frame {
     let meta = EventMeta {
         event_name: routing.into(),
         object_name: "Prov".into(),
@@ -60,7 +60,7 @@ fn event_frame(to: &str, routing: &str, ev: Event) -> Frame {
     Frame::new(Header::new(1, Flags::RAW_BINARY, to, "Prov"), payload)
 }
 
-fn event(name: &str, kind: EventKind, data: Object, component_id: i32) -> Event {
+pub(super) fn event(name: &str, kind: EventKind, data: Object, component_id: i32) -> Event {
     Event {
         name: name.into(),
         kind,

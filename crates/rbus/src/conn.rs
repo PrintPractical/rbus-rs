@@ -1,9 +1,10 @@
 //! The connection engine: one unix socket to rtrouted, a reader task, a writer
 //! task, and the tables that route what arrives.
 //!
-//! - **Writes** go through an unbounded channel to the writer task, so sending
-//!   never blocks a caller and frames leave in the order they were queued.
-//! - **Reads** happen in the reader task. It matches each response to its
+//! - **Writes** go through an unbounded channel to the connection task, so
+//!   sending never blocks a caller and frames leave in the order they were
+//!   queued.
+//! - **Reads** happen in a reader task per socket. It matches each response to its
 //!   pending request by sequence number (wire-protocol.md section 3), routes
 //!   each event to its subscription by the echoed component id, fans out
 //!   broker advisories, and hands each request for our providers to a task
@@ -14,11 +15,19 @@
 //! - **Resubscription**: a connect advisory (another client joined the bus)
 //!   wakes a debounced task that re-sends every subscription, because a C
 //!   provider that restarted has forgotten ours (decisions.md D11).
+//! - **Reconnect** (L5): when the socket is lost, the connection task fails
+//!   every pending request and, if the builder asked for it, connects again
+//!   with backoff. On the new socket it registers the inbox, the component and
+//!   the advisory route before anything else, then re-registers every element
+//!   alias and re-sends every subscription (D37). Frames queued for the lost
+//!   socket are dropped, never sent on the new one; frames queued while
+//!   reconnecting are dropped too, unless the new socket is already up.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
@@ -38,6 +47,7 @@ use crate::bus::Timeouts;
 use crate::discover::Advisory;
 use crate::error::{Error, Result};
 use crate::queue::Queue;
+use crate::retry::Retry;
 
 /// Route id of the inbox (`rtConnection.c:680`).
 const INBOX_ROUTE_ID: u32 = 1;
@@ -56,12 +66,18 @@ const RESUBSCRIBE_DEBOUNCE: Duration = Duration::from_millis(250);
 pub enum ConnectionState {
     /// Connected and registered.
     Connected,
-    /// Closed, by [`crate::Rbus::close`] or because the broker went away.
+    /// The broker went away and the connection is being made again (L5).
+    /// Calls fail with [`crate::Error::Disconnected`] meanwhile; subscriptions
+    /// and providers stay in place and are registered again on reconnect.
+    Reconnecting,
+    /// Closed, by [`crate::Rbus::close`], or because the broker went away
+    /// and reconnecting is off or gave up.
     Closed,
 }
 
 enum Outgoing {
-    Frame(Bytes),
+    /// A frame, and the socket generation it was queued for.
+    Frame(Bytes, u64),
     /// Flush, then shut down the write side of the socket.
     Shutdown,
 }
@@ -81,13 +97,17 @@ pub(crate) struct Core {
     pending: Mutex<HashMap<u32, oneshot::Sender<Frame>>>,
     state: watch::Sender<ConnectionState>,
     tx: mpsc::UnboundedSender<Outgoing>,
+    /// Counts lost sockets. A frame queued for an earlier socket is dropped.
+    generation: AtomicU64,
     seq: AtomicU32,
     inbox: String,
     pub(crate) timeouts: Timeouts,
     subs: Mutex<HashMap<i32, SubEntry>>,
     next_sub_id: AtomicI32,
     advisory_listeners: Mutex<Vec<Weak<Queue<Advisory>>>>,
-    advisories_registered: AtomicBool,
+    /// Whether `_RTROUTED.ADVISORY` is registered. The lock also orders its
+    /// registration against a new socket's (see [`Core::registration`]).
+    advisories: Mutex<bool>,
     resubscribe: Arc<Notify>,
     /// The providers served on this connection.
     pub(crate) registry: crate::provider::Registry,
@@ -95,6 +115,8 @@ pub(crate) struct Core {
     pub(crate) component_route: u32,
     /// The component name.
     pub(crate) component: String,
+    /// Every element alias registered with the broker, for reconnects.
+    aliases: Mutex<BTreeSet<String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -133,6 +155,47 @@ impl Core {
         *self.state.borrow() == ConnectionState::Closed
     }
 
+    fn is_connected(&self) -> bool {
+        *self.state.borrow() == ConnectionState::Connected
+    }
+
+    /// The socket was lost and a new one is on its way: fail every pending
+    /// request, and make sure nothing queued so far reaches the new socket.
+    fn lose(&self) {
+        // In this order, a request either sees the new state or generation,
+        // or has its pending entry cleared below.
+        self.state.send_replace(ConnectionState::Reconnecting);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.pending().clear();
+    }
+
+    /// The frames that register this connection, written first on every
+    /// socket: the inbox, the component and, if anything listens, the
+    /// advisory topic. Each route must go out exactly once per socket: a
+    /// second add of the same route becomes an alias of itself, and rtrouted
+    /// crashes when it later clears the route. So the socket gets a new
+    /// generation here, under the lock `ensure_advisories` takes, and
+    /// anything queued before is dropped.
+    fn registration(&self) -> Result<Vec<Bytes>> {
+        let advisories = lock(&self.advisories);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let mut routes = vec![
+            Route::add(self.inbox.clone(), INBOX_ROUTE_ID),
+            Route::add(self.component.clone(), self.component_route),
+        ];
+        if *advisories {
+            routes.push(Route::add(control::TOPIC_ADVISORY, ADVISORY_ROUTE_ID));
+        }
+        routes
+            .iter()
+            .map(|route| {
+                let header =
+                    Header::new(self.next_seq(), Flags::NONE, control::TOPIC_SUBSCRIBE, "");
+                Ok(Frame::new(header, control::encode(route)).encode()?)
+            })
+            .collect()
+    }
+
     fn next_seq(&self) -> u32 {
         loop {
             // Zero is never used, as in C.
@@ -143,11 +206,17 @@ impl Core {
         }
     }
 
-    /// Queues a frame for the writer task.
+    /// Queues a frame for the current socket.
     pub(crate) fn queue(&self, frame: &Frame) -> Result<()> {
+        self.queue_for(frame, self.generation.load(Ordering::Acquire))
+    }
+
+    /// Queues a frame for the socket of `generation`; it is dropped if that
+    /// socket is gone by the time the frame's turn comes.
+    pub(crate) fn queue_for(&self, frame: &Frame, generation: u64) -> Result<()> {
         let bytes = frame.encode()?;
         self.tx
-            .send(Outgoing::Frame(bytes))
+            .send(Outgoing::Frame(bytes, generation))
             .map_err(|_| Error::Disconnected)
     }
 
@@ -172,7 +241,8 @@ impl Core {
         flags: Flags,
         payload: Vec<u8>,
     ) -> Result<Pending> {
-        if self.is_closed() {
+        let generation = self.generation.load(Ordering::Acquire);
+        if !self.is_connected() {
             return Err(Error::Disconnected);
         }
         let seq = self.next_seq();
@@ -187,7 +257,12 @@ impl Core {
             seq,
             core: self.clone(),
         };
-        self.queue(&frame)?;
+        // The socket was lost after the check above, maybe after `lose`
+        // cleared the pending table: this request would wait for nothing.
+        if self.generation.load(Ordering::Acquire) != generation {
+            return Err(Error::Disconnected);
+        }
+        self.queue_for(&frame, generation)?;
         trace!(seq, topic, "request sent");
         Ok(pending)
     }
@@ -208,8 +283,10 @@ impl Core {
 
     /// Registers for `_RTROUTED.ADVISORY` the first time anything needs it.
     pub(crate) fn ensure_advisories(&self) -> Result<()> {
-        if !self.advisories_registered.swap(true, Ordering::AcqRel) {
+        let mut registered = lock(&self.advisories);
+        if !*registered {
             self.send_control(&Route::add(control::TOPIC_ADVISORY, ADVISORY_ROUTE_ID))?;
+            *registered = true;
         }
         Ok(())
     }
@@ -252,9 +329,81 @@ impl Core {
             .collect()
     }
 
+    /// Claims element names for this component, so a reconnect registers
+    /// them again, and queues their registration requests. One lock covers
+    /// both, so a reconnect's replay and a removal can't interleave.
+    pub(crate) fn add_aliases(
+        self: &Arc<Self>,
+        names: &[String],
+    ) -> Vec<(String, Result<Pending>)> {
+        let mut aliases = lock(&self.aliases);
+        names
+            .iter()
+            .map(|name| {
+                aliases.insert(name.clone());
+                (name.clone(), self.alias_request(name))
+            })
+            .collect()
+    }
+
+    /// Forgets element names. `registered` ones are also removed from the
+    /// broker (fire and forget, as `rbus_unregDataElements` does).
+    pub(crate) fn remove_aliases(&self, names: &[String], registered: bool) {
+        let mut aliases = lock(&self.aliases);
+        for name in names {
+            aliases.remove(name);
+            if registered && !self.is_closed() {
+                let _ = self.send_control(&Route::remove(&**name, self.component_route));
+            }
+        }
+    }
+
+    fn alias_request(self: &Arc<Self>, name: &str) -> Result<Pending> {
+        self.broker_request(
+            control::TOPIC_SUBSCRIBE,
+            &Route::add(name, self.component_route),
+        )
+    }
+
+    /// Registers every element alias again after a reconnect, then re-sends
+    /// every subscription.
+    async fn replay(self: Arc<Self>) {
+        let requests: Vec<_> = {
+            let aliases = lock(&self.aliases);
+            aliases
+                .iter()
+                .map(|name| (name.clone(), self.alias_request(name)))
+                .collect()
+        };
+        let count = requests.len();
+        for (name, request) in requests {
+            let reply = match request {
+                Ok(p) => p.wait(self.timeouts.broker, "register").await,
+                Err(e) => Err(e),
+            };
+            match reply.and_then(|f| Ok(control::decode::<control::ResultReply>(&f.payload)?)) {
+                Ok(r) if r.result == 0 => {}
+                Ok(r) => warn!(
+                    name,
+                    code = r.result,
+                    "element not registered again after reconnect"
+                ),
+                Err(Error::Disconnected) => return,
+                Err(e) => warn!(name, error = %e, "element not registered again after reconnect"),
+            }
+        }
+        debug!(aliases = count, "registered again after reconnect");
+        crate::subscribe::resubscribe_all(&self).await;
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
         self.pending().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn aliases(&self) -> Vec<String> {
+        lock(&self.aliases).iter().cloned().collect()
     }
 
     #[cfg(test)]
@@ -330,7 +479,7 @@ impl Core {
 /// A connection to rtrouted, registered as one component.
 pub(crate) struct Conn {
     core: Arc<Core>,
-    reader: JoinHandle<()>,
+    task: JoinHandle<()>,
     resubscriber: JoinHandle<()>,
 }
 
@@ -387,13 +536,14 @@ impl Conn {
     /// Connects to the broker at `socket` and registers the inbox and the
     /// component. Registration is fire-and-forget, as in C: the broker handles
     /// a connection's frames in order, so later requests see the routes.
+    /// With `reconnect`, a lost socket is replaced (L5).
     pub(crate) async fn connect(
         socket: &Path,
         component: &str,
         timeouts: Timeouts,
+        reconnect: Option<Retry>,
     ) -> Result<Conn> {
-        let stream = connect_socket(socket, timeouts.broker).await?;
-        let (read, write) = stream.into_split();
+        let mut stream = connect_socket(socket, timeouts.broker).await?;
         let (state, _) = watch::channel(ConnectionState::Connected);
         let (tx, rx) = mpsc::unbounded_channel();
         let resubscribe = Arc::new(Notify::new());
@@ -401,28 +551,36 @@ impl Conn {
             pending: Mutex::new(HashMap::new()),
             state,
             tx,
+            generation: AtomicU64::new(0),
             seq: AtomicU32::new(0),
             inbox: inbox_name(),
             timeouts,
             subs: Mutex::new(HashMap::new()),
             next_sub_id: AtomicI32::new(1),
             advisory_listeners: Mutex::new(Vec::new()),
-            advisories_registered: AtomicBool::new(false),
+            advisories: Mutex::new(false),
             resubscribe: resubscribe.clone(),
             registry: crate::provider::Registry::default(),
             component_route: NEXT_COMPONENT_ROUTE.fetch_add(1, Ordering::Relaxed),
             component: component.to_owned(),
+            aliases: Mutex::new(BTreeSet::new()),
         });
-        tokio::spawn(writer(write, rx, Arc::downgrade(&core)));
-        let reader = tokio::spawn(reader(read, core.clone()));
+        let link = Link {
+            socket: socket.to_owned(),
+            wait: timeouts.broker,
+            reconnect,
+        };
+        // Registered before anything else can queue a frame.
+        for frame in core.registration()? {
+            stream.write_all(&frame).await?;
+        }
+        let task = tokio::spawn(connection(Arc::downgrade(&core), rx, stream, link));
         let resubscriber = tokio::spawn(resubscriber(Arc::downgrade(&core), resubscribe));
         let conn = Conn {
             core,
-            reader,
+            task,
             resubscriber,
         };
-        conn.send_control(&Route::add(conn.inbox.clone(), INBOX_ROUTE_ID))?;
-        conn.send_control(&Route::add(conn.component.clone(), conn.component_route))?;
         debug!(inbox = %conn.inbox, component = %conn.component, "connected to rtrouted");
         Ok(conn)
     }
@@ -449,7 +607,7 @@ impl Conn {
             .is_err()
         {
             warn!("broker did not close the connection; dropping it");
-            self.reader.abort();
+            self.task.abort();
             self.core.close();
         }
         debug!(component = %self.component, "connection closed");
@@ -464,13 +622,13 @@ impl Conn {
 }
 
 impl Drop for Conn {
-    /// Best-effort cleanup (L13): queue the unregistration, then let the writer
-    /// flush it and close the socket once the core is gone.
+    /// Best-effort cleanup (L13): queue the unregistration, then let the
+    /// connection task flush it and close the socket.
     fn drop(&mut self) {
         if !self.is_closed() {
             self.unregister();
+            let _ = self.tx.send(Outgoing::Shutdown);
         }
-        self.reader.abort();
         self.resubscriber.abort();
     }
 }
@@ -499,27 +657,196 @@ impl Drop for Pending {
     }
 }
 
-async fn writer(
-    mut write: OwnedWriteHalf,
-    mut rx: mpsc::UnboundedReceiver<Outgoing>,
+/// Where to connect, and whether to come back after losing the socket.
+struct Link {
+    socket: PathBuf,
+    /// How long a full broker backlog is waited out, per attempt.
+    wait: Duration,
+    reconnect: Option<Retry>,
+}
+
+/// Aborts a task when dropped.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Why a socket's write loop stopped.
+enum Stop {
+    /// `close()` or `Drop` asked for it.
+    Shutdown,
+    /// Every handle on the core is gone.
+    Dropped,
+    /// The broker closed the socket, or it failed.
+    Lost,
+}
+
+/// The connection task: writes queued frames to the socket, and when the
+/// socket is lost, either closes the connection or makes a new one.
+/// `Conn::connect` registered the first socket already.
+async fn connection(
     core: Weak<Core>,
+    mut rx: mpsc::UnboundedReceiver<Outgoing>,
+    stream: UnixStream,
+    link: Link,
 ) {
-    while let Some(out) = rx.recv().await {
-        match out {
-            Outgoing::Frame(bytes) => {
-                if let Err(e) = write.write_all(&bytes).await {
-                    warn!(error = %e, "write to rtrouted failed");
-                    if let Some(core) = core.upgrade() {
-                        core.close();
+    let mut stream = stream;
+    let mut registered = true;
+    loop {
+        let (read, mut write) = stream.into_split();
+        let Some(c) = core.upgrade() else { return };
+        let mut reader = AbortOnDrop(tokio::spawn(reader(read, c.clone())));
+        let registration = if std::mem::take(&mut registered) {
+            Ok(())
+        } else {
+            register(&c, &mut write).await
+        };
+        let generation = c.generation.load(Ordering::Acquire);
+        let stop = match registration {
+            Ok(()) => {
+                // Only from Reconnecting: close() may have run meanwhile.
+                let reconnected = c.state.send_if_modified(|s| {
+                    let reconnecting = *s == ConnectionState::Reconnecting;
+                    if reconnecting {
+                        *s = ConnectionState::Connected;
                     }
-                    return;
+                    reconnecting
+                });
+                if reconnected {
+                    debug!(inbox = %c.inbox, "reconnected to rtrouted");
+                    tokio::spawn(c.clone().replay());
                 }
+                drop(c);
+                write_frames(&mut rx, &mut write, &mut reader.0, generation).await
             }
-            Outgoing::Shutdown => break,
+            Err(e) => {
+                warn!(error = %e, "registering with rtrouted failed");
+                drop(c);
+                Stop::Lost
+            }
+        };
+        match stop {
+            Stop::Shutdown => {
+                // close() waits for the broker to close its side; the reader
+                // sees that and ends.
+                let _ = write.shutdown().await;
+                let _ = tokio::time::timeout(link.wait, &mut reader.0).await;
+                if let Some(c) = core.upgrade() {
+                    c.close();
+                }
+                return;
+            }
+            Stop::Dropped => {
+                let _ = write.shutdown().await;
+                return;
+            }
+            Stop::Lost => {}
+        }
+        drop((reader, write));
+        let Some(c) = core.upgrade() else { return };
+        let Some(retry) = link.reconnect else {
+            c.close();
+            return;
+        };
+        if c.is_closed() {
+            return;
+        }
+        warn!("lost the connection to rtrouted; reconnecting");
+        c.lose();
+        drop(c);
+        match reconnect(&core, &mut rx, &link, retry).await {
+            Some(s) => stream = s,
+            None => {
+                if let Some(c) = core.upgrade() {
+                    c.close();
+                }
+                return;
+            }
         }
     }
-    // Either close() asked for it or every handle is gone.
-    let _ = write.shutdown().await;
+}
+
+/// Writes the registration frames, ahead of anything queued.
+async fn register(core: &Core, write: &mut OwnedWriteHalf) -> Result<()> {
+    for frame in core.registration()? {
+        write.write_all(&frame).await?;
+    }
+    Ok(())
+}
+
+/// Writes queued frames until the socket is lost or the connection ends.
+async fn write_frames(
+    rx: &mut mpsc::UnboundedReceiver<Outgoing>,
+    write: &mut OwnedWriteHalf,
+    reader: &mut JoinHandle<()>,
+    generation: u64,
+) -> Stop {
+    loop {
+        tokio::select! {
+            out = rx.recv() => match out {
+                Some(Outgoing::Frame(bytes, g)) if g == generation => {
+                    if let Err(e) = write.write_all(&bytes).await {
+                        warn!(error = %e, "write to rtrouted failed");
+                        return Stop::Lost;
+                    }
+                }
+                Some(Outgoing::Frame(..)) => trace!("frame for a lost socket dropped"),
+                Some(Outgoing::Shutdown) => return Stop::Shutdown,
+                None => return Stop::Dropped,
+            },
+            _ = &mut *reader => return Stop::Lost,
+        }
+    }
+}
+
+/// Connects again on `retry`'s schedule, dropping whatever is queued
+/// meanwhile. `None` if it gave up, or the connection was closed or dropped.
+async fn reconnect(
+    core: &Weak<Core>,
+    rx: &mut mpsc::UnboundedReceiver<Outgoing>,
+    link: &Link,
+    retry: Retry,
+) -> Option<UnixStream> {
+    let start = tokio::time::Instant::now();
+    let mut delay = retry.initial;
+    loop {
+        // Nothing queued so far may reach the new socket.
+        loop {
+            match rx.try_recv() {
+                Ok(Outgoing::Frame(..)) => {}
+                Ok(Outgoing::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) => {
+                    return None;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+            }
+        }
+        match connect_socket(&link.socket, link.wait).await {
+            Ok(stream) => return Some(stream),
+            Err(e) => debug!(error = %e, ?delay, "reconnect failed"),
+        }
+        if start.elapsed() + delay > retry.max_elapsed {
+            warn!(elapsed = ?start.elapsed(), "giving up reconnecting to rtrouted");
+            return None;
+        }
+        let sleep = tokio::time::sleep(delay);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = &mut sleep => break,
+                out = rx.recv() => match out {
+                    Some(Outgoing::Frame(..)) => {}
+                    Some(Outgoing::Shutdown) | None => return None,
+                },
+            }
+        }
+        if core.strong_count() == 0 {
+            return None;
+        }
+        delay = (delay * 2).min(retry.max_delay);
+    }
 }
 
 async fn reader(mut read: OwnedReadHalf, core: Arc<Core>) {
@@ -542,13 +869,12 @@ async fn reader(mut read: OwnedReadHalf, core: Arc<Core>) {
                 Ok(None) => break,
                 Err(e) => {
                     // The stream can't be resynchronised after a bad header.
-                    warn!(error = %e, "undecodable frame from rtrouted; closing");
+                    warn!(error = %e, "undecodable frame from rtrouted; dropping the socket");
                     break 'read;
                 }
             }
         }
     }
-    core.close();
 }
 
 /// Waits for connect advisories and, once they stop for a moment, re-sends

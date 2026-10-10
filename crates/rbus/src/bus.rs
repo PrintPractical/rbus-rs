@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use crate::conn::{Conn, ConnectionState};
 use crate::error::Result;
 use crate::name::check_component;
+use crate::retry::Retry;
 
 /// The broker socket C clients use by default (`rbuscore.c:322`).
 pub const DEFAULT_SOCKET: &str = "/tmp/rtrouted";
@@ -95,6 +96,7 @@ impl Rbus {
             component: component.into(),
             socket: PathBuf::from(DEFAULT_SOCKET),
             timeouts: Timeouts::default(),
+            reconnect: None,
         }
     }
 
@@ -113,7 +115,21 @@ impl Rbus {
         &self.inner.timeouts
     }
 
-    /// Watches the connection state.
+    /// Watches the connection state: `Connected`, `Reconnecting` (only with
+    /// [`RbusBuilder::reconnect`]) or `Closed`.
+    ///
+    /// ```no_run
+    /// # async fn demo(bus: rbus::Rbus) {
+    /// use rbus::ConnectionState;
+    ///
+    /// let mut state = bus.state();
+    /// while state.changed().await.is_ok() {
+    ///     if *state.borrow() == ConnectionState::Closed {
+    ///         break;
+    ///     }
+    /// }
+    /// # }
+    /// ```
     pub fn state(&self) -> watch::Receiver<ConnectionState> {
         self.inner.conn.state()
     }
@@ -143,6 +159,7 @@ pub struct RbusBuilder {
     component: String,
     socket: PathBuf,
     timeouts: Timeouts,
+    reconnect: Option<Retry>,
 }
 
 impl RbusBuilder {
@@ -164,10 +181,37 @@ impl RbusBuilder {
         self
     }
 
+    /// Reconnects on `retry`'s schedule when the broker goes away (L5),
+    /// instead of closing. The first attempt is immediate.
+    ///
+    /// On the new connection, the component, every element of every
+    /// provider and every subscription are registered again. Until then the
+    /// state is [`ConnectionState::Reconnecting`] and calls fail with
+    /// [`crate::Error::Disconnected`]; calls in flight when the broker went
+    /// away fail the same way. Events published meanwhile may be lost. If
+    /// `retry` gives up, the connection closes.
+    ///
+    /// ```no_run
+    /// # async fn demo() -> rbus::Result<()> {
+    /// use std::time::Duration;
+    /// use rbus::{Rbus, Retry};
+    ///
+    /// let bus = Rbus::builder("com.example.app")
+    ///     .reconnect(Retry::exponential().max_elapsed(Duration::MAX))
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn reconnect(mut self, retry: Retry) -> Self {
+        self.reconnect = Some(retry);
+        self
+    }
+
     /// Connects and registers the component.
     pub async fn connect(self) -> Result<Rbus> {
         check_component(&self.component)?;
-        let conn = Conn::connect(&self.socket, &self.component, self.timeouts).await?;
+        let conn =
+            Conn::connect(&self.socket, &self.component, self.timeouts, self.reconnect).await?;
         Ok(Rbus {
             inner: Arc::new(Inner {
                 conn,

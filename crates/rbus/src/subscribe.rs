@@ -33,6 +33,7 @@ use crate::convert::from_object;
 use crate::error::{Error, Result, Status, TypeError};
 use crate::name::{EventName, IntoName, Name, NameError, PropertyName, TablePath};
 use crate::queue::{Overflow, Popped, Queue};
+use crate::retry::Retry;
 use crate::types::RbusType;
 
 /// How long resubscription keeps retrying a provider that is still starting.
@@ -55,50 +56,6 @@ pub enum EventError {
         /// Why it didn't convert.
         error: TypeError,
     },
-}
-
-/// Retrying a subscription until its provider appears (E10). Only "no
-/// provider" is retried; any other error ends the attempt.
-///
-/// ```
-/// use std::time::Duration;
-/// let retry = rbus::Retry::exponential().max_elapsed(Duration::from_secs(60));
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Retry {
-    initial: Duration,
-    max_delay: Duration,
-    max_elapsed: Duration,
-}
-
-impl Retry {
-    /// C's schedule: 1 s, doubling, at most 60 s apart, giving up after 600 s
-    /// (`rbus.c:5096, 5155-5185`).
-    pub fn exponential() -> Retry {
-        Retry {
-            initial: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
-            max_elapsed: Duration::from_secs(600),
-        }
-    }
-
-    /// The first delay.
-    pub fn initial(mut self, d: Duration) -> Retry {
-        self.initial = d;
-        self
-    }
-
-    /// The longest delay between attempts.
-    pub fn max_delay(mut self, d: Duration) -> Retry {
-        self.max_delay = d;
-        self
-    }
-
-    /// Give up once this much time has passed.
-    pub fn max_elapsed(mut self, d: Duration) -> Retry {
-        self.max_elapsed = d;
-        self
-    }
 }
 
 /// A property's new value (E3), or its current value when the subscription
@@ -752,10 +709,5 @@ mod tests {
             error: TypeError::mismatch("u8", &Value::Bool(true)),
         };
         assert_eq!(e.to_string(), "event E!: expected u8, found bool");
-        let r = Retry::exponential()
-            .initial(Duration::from_millis(1))
-            .max_delay(Duration::from_millis(2))
-            .max_elapsed(Duration::from_millis(3));
-        assert_eq!(r.max_elapsed, Duration::from_millis(3));
     }
 }

@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rbus_wire::control::{self, ResultReply, Route};
+use rbus_wire::control::{self, ResultReply};
 use tracing::{Instrument, debug, debug_span};
 
 use crate::bus::Rbus;
@@ -159,13 +159,11 @@ impl<P> Provided<P> {
     /// did register are removed again, as `rbus_regDataElements` does.
     async fn register(mut self, names: Vec<String>) -> Result<Self> {
         let conn = &self.bus.inner.conn;
-        let route = conn.component_route;
-        let mut pending = Vec::with_capacity(names.len());
-        for name in names {
-            let request = conn.broker_request(control::TOPIC_SUBSCRIBE, &Route::add(&*name, route));
-            pending.push((name, request));
-        }
+        // Claimed before the requests go out, so a reconnect meanwhile
+        // registers them again.
+        let pending = conn.add_aliases(&names);
         let mut failure = None;
+        let mut failed = Vec::new();
         for (name, request) in pending {
             let reply = match request {
                 Ok(p) => p.wait(self.bus.inner.timeouts.broker, "register").await,
@@ -182,15 +180,20 @@ impl<P> Provided<P> {
                         _ => Status::BusError,
                     };
                     failure.get_or_insert_with(|| status(&name, s));
+                    failed.push(name);
                 }
                 Err(e) => {
                     failure.get_or_insert(e);
+                    failed.push(name);
                 }
             }
         }
         match failure {
             // Dropping `self` unregisters what did register.
-            Some(e) => Err(e),
+            Some(e) => {
+                conn.remove_aliases(&failed, false);
+                Err(e)
+            }
             None => {
                 debug!(names = self.names.len(), "provider registered");
                 Ok(self)
@@ -281,11 +284,7 @@ impl<P> Drop for Provided<P> {
     /// does) and the provider's rows.
     fn drop(&mut self) {
         let conn = &self.bus.inner.conn;
-        if !conn.is_closed() {
-            for name in &self.names {
-                let _ = conn.send_control(&Route::remove(&**name, conn.component_route));
-            }
-        }
+        conn.remove_aliases(&self.names, true);
         conn.registry.unmount(self.id);
     }
 }

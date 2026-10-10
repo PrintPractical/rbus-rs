@@ -43,20 +43,26 @@ impl Listener {
     /// Connects a bus to this socket and returns both ends, with the two
     /// registration frames already consumed.
     async fn connect(&self, timeouts: Timeouts) -> (Rbus, Peer) {
-        let bus = Rbus::builder("test.component")
-            .socket(&self.path)
-            .timeouts(timeouts)
-            .connect()
+        self.connect_with(Rbus::builder("test.component").timeouts(timeouts))
             .await
-            .unwrap();
-        let (stream, _) = self.listener.accept().await.unwrap();
-        let mut peer = Peer {
-            stream,
-            decoder: FrameDecoder::new(),
-        };
+    }
+
+    /// [`Listener::connect`] with more builder options.
+    async fn connect_with(&self, builder: crate::RbusBuilder) -> (Rbus, Peer) {
+        let bus = builder.socket(&self.path).connect().await.unwrap();
+        let mut peer = self.accept().await;
         peer.recv().await;
         peer.recv().await;
         (bus, peer)
+    }
+
+    /// The broker's end of the next connection.
+    async fn accept(&self) -> Peer {
+        let (stream, _) = self.listener.accept().await.unwrap();
+        Peer {
+            stream,
+            decoder: FrameDecoder::new(),
+        }
     }
 }
 
@@ -828,3 +834,4 @@ async fn m1_m3_invoke() {
 
 mod events;
 mod provider;
+mod reconnect;
