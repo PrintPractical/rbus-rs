@@ -6,7 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/rbus-wire"
 publish.workspace = true
+readme = "README.md"
 
 [dependencies]
 bytes = { workspace = true, features = ["serde"] }
@@ -20,3 +24,6 @@ proptest.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

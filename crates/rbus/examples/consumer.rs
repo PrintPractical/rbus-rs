@@ -1,5 +1,5 @@
-//! A consumer: reads a property and the object around it, then prints every
-//! change to the property.
+//! A consumer: reads a property and the object around it, prints the next
+//! ten changes to the property, and closes.
 //!
 //! ```sh
 //! cargo run --example consumer -- Device.SampleProvider.SampleData.IntData
@@ -35,12 +35,14 @@ async fn main() -> rbus::Result<()> {
 
     // Value changes, as a stream.
     let mut changes = bus.subscribe_value::<Value>(&name).await?;
-    println!("watching {name}; Ctrl-C to stop");
-    while let Some(change) = changes.next().await {
-        match change {
-            Ok(c) => println!("{}: {:?} -> {:?}", c.name, c.old, c.new),
-            Err(e) => eprintln!("{e}"),
+    println!("watching {name} for ten changes");
+    for _ in 0..10 {
+        match changes.next().await {
+            Some(Ok(c)) => println!("{}: {:?} -> {}", c.name, c.old, c.new),
+            Some(Err(e)) => eprintln!("{e}"),
+            None => break,
         }
     }
+    // Unsubscribes, unregisters and closes the socket.
     bus.close().await
 }

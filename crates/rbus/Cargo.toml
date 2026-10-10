@@ -5,9 +5,14 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-readme = "../../README.md"
+readme = "README.md"
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/rbus"
 publish.workspace = true
+# The integration tests need rbus-testkit and the interop container.
+exclude = ["tests/"]
 
 [dependencies]
 bytes.workspace = true
@@ -39,3 +44,6 @@ time = ["dep:time"]
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

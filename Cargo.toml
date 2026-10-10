@@ -8,6 +8,10 @@ edition = "2024"
 rust-version = "1.85"
 repository = "https://github.com/PrintPractical/rbus-rs"
 license = "Apache-2.0"
+keywords = ["rdk", "rbus", "rtrouted", "tr-181", "ipc"]
+categories = ["network-programming", "asynchronous", "embedded"]
+# The owner flips this for a release; CI's package job flips it in its own
+# checkout to verify the tarballs.
 publish = false
 
 # Every dependency is declared once, here; crates add features on top.

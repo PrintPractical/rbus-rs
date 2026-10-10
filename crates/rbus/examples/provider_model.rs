@@ -74,7 +74,8 @@ async fn main() -> rbus::Result<()> {
         channel: 36,
         status: "Up".into(),
     })?;
-    println!("serving Device.Example.WiFi.; Ctrl-C to stop");
+    // Runs until the process is stopped; the broker drops its routes then.
+    println!("serving Device.Example.WiFi.");
 
     // The app changes its state; subscribers hear about it.
     let mut tick = tokio::time::interval(Duration::from_secs(10));

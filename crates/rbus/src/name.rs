@@ -27,6 +27,7 @@
 //! while compiling and picks the type from its suffix:
 //!
 //! ```
+//! # #[cfg(feature = "macros")] mod example {
 //! # async fn demo(bus: rbus::Rbus) -> rbus::Result<()> {
 //! use rbus::{MethodName, PropertyName, name};
 //!
@@ -35,6 +36,7 @@
 //! bus.invoke::<_, ()>(REBOOT, ()).await?;
 //! # let _ = ENABLE;
 //! # Ok(()) }
+//! # }
 //! ```
 //!
 //! A name of the wrong kind doesn't compile:
@@ -307,7 +309,7 @@ macro_rules! name_type {
 
 /// A typed name works wherever any name does: a partial-path get, a
 /// discovery query.
-macro_rules! into_any_name {
+macro_rules! typed_into_name {
     ($($ty:ident),*) => {$(
         impl IntoName<Name> for $ty {
             fn into_name(self) -> Result<Name, NameError> {
@@ -355,7 +357,7 @@ name_type!(
     Kind::Table
 );
 
-into_any_name!(PropertyName, MethodName, EventName, TablePath);
+typed_into_name!(PropertyName, MethodName, EventName, TablePath);
 
 macro_rules! into_any_name {
     ($($ty:ident),*) => {$(

@@ -394,7 +394,8 @@ impl<'a, I> SubscribeBuilder<'a, I> {
         self
     }
 
-    /// How many events to hold for a slow consumer (default 256).
+    /// How many events to hold for a slow consumer (default 256; at least
+    /// 1, so 0 means 1).
     pub fn buffer(mut self, events: usize) -> Self {
         self.buffer = events;
         self

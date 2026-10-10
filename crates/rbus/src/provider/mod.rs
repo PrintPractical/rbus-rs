@@ -10,6 +10,7 @@
 //! - [`DataModel`], a builder of closures for trees known only at run time.
 //!
 //! ```no_run
+//! # #[cfg(feature = "macros")] mod example {
 //! use rbus::provider::{Prop, Table};
 //!
 //! #[derive(rbus::Model, Default)]
@@ -31,6 +32,7 @@
 //! hosts.enable.set(true);                 // published to subscribers
 //! hosts.hosts.insert(Host { name: "printer".into() })?;
 //! # Ok(()) }
+//! # }
 //! ```
 //!
 //! Or implement [`Provider`] by hand and hand it to [`Rbus::provide`](crate::Rbus::provide).

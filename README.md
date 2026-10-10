@@ -8,7 +8,7 @@ rbus-rs speaks the `rtrouted` wire protocol directly. There is no C library to l
 - **Provide:** declare a data model as a struct and rbus serves gets, applies sets, keeps table rows and publishes every change. Impl blocks, a builder and a plain `Provider` trait are there when you need more control.
 - **Interop-tested:** CI runs the suite against the real `rtrouted`, `rbuscli` and rbus's own conformance programs.
 
-> **Status:** pre-release. The crates are not on crates.io yet, and the API may still change.
+> **Status:** pre-release (0.x): the API may still change.
 
 The RBUS protocol and its reference implementation are [RDK's rbus](https://github.com/rdkcentral/rbus) (Apache-2.0). rbus-rs is an independent reimplementation that contains no rbus code. The C sources served as the protocol reference, and the C programs serve as interop test peers.
 
@@ -111,7 +111,7 @@ async fn main() -> rbus::Result<()> {
 }
 ```
 
-`crates/rbus/examples` has more: `consumer.rs`, `provider_model.rs` and `bridge.rs`, a component that consumes and provides on one connection. The rustdoc for `rbus` covers the whole API.
+The [examples](https://github.com/PrintPractical/rbus-rs/tree/main/crates/rbus/examples) have more: `consumer.rs`, `provider_model.rs` and `bridge.rs`, a component that consumes and provides on one connection. The rustdoc for `rbus` covers the whole API.
 
 ## Compatibility
 
@@ -136,7 +136,7 @@ Every feature has integration tests against the real broker, named after its ID 
 | Events | Typed streams for value changes, table rows and general events (E1–E5); initial value (E9); retry until the provider appears (E10); a bounded buffer that reports lag, or applies backpressure |
 | Providers | Properties, events and methods with async handlers (P1–P5); caller identity (P7); subscription hooks (P8); value-change events, including from state (P9, P11); provider-side filters (P12); initial values (P15); direct-mode requests rejected (P19) |
 | Provider tables | Row templates, consumer and app rows, aliases, nested tables (PT1–PT5); partial-path gets over the model (PT8); row events (PT9); row names for `rbuscli` (PT10) |
-| Cross-cutting | `tracing` spans per operation (X1); a typed `Error` and `Status` (X3); legacy CCSP codes (X4); both header sizes (X5); tokio (X8) |
+| Cross-cutting | `tracing` spans per operation (X1); a typed `Error` and `Status` (X3); legacy CCSP codes (X4); both header sizes (X5); tokio (X8); configurable limits on what peers send (`RbusBuilder::limits`) |
 
 ## Not supported
 
@@ -150,7 +150,7 @@ Every feature has integration tests against the real broker, named after its ID 
   - interval and duration subscriptions;
   - the element-info browsing API;
   - the C timeout environment variables and override files.
-- **Per-call timeouts:** use `tokio::time::timeout`. Every request future is cancel-safe.
+- **Per-call timeouts:** use `tokio::time::timeout`. Dropping a request future cancels it and leaves nothing behind. A `set_many` that spans several providers goes to them one at a time, so cancelling it part-way can leave the earlier ones' sets applied.
 - **Planned after 0.1:**
   - parsing values from strings (V8);
   - consumer-side event filters (E6);
@@ -172,4 +172,4 @@ Interop tests need Linux and the real broker, so `scripts/interop.sh` runs them 
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/PrintPractical/rbus-rs/blob/main/LICENSE).

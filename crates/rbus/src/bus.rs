@@ -28,15 +28,16 @@ pub const DEFAULT_SOCKET: &str = "/tmp/rtrouted";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Timeouts {
-    /// `get` and `get_many`; 15 s.
+    /// `get`, `get_many`, `get_tree` and listing a table's rows; 15 s.
     pub get: Duration,
-    /// `set`; 15 s.
+    /// `set`, and adding or removing a table row; 15 s.
     pub set: Duration,
     /// Each provider's part of a `set_many`; 60 s.
     pub set_many: Duration,
     /// `invoke`; 15 s.
     pub invoke: Duration,
-    /// Queries to the broker itself, such as owner lookups; 5 s.
+    /// Queries to the broker itself: owner lookups, discovery, registering
+    /// a provider's names, and how long `close` waits; 5 s.
     pub broker: Duration,
     /// `subscribe` and `unsubscribe`, per attempt; 15 s.
     pub subscribe: Duration,
@@ -109,7 +110,10 @@ impl Timeouts {
 ///
 /// `Rbus` is cheap to clone, and every clone shares the connection, so hand it
 /// to as many tasks as you like. The connection closes on [`Rbus::close`], or
-/// when the last clone is dropped.
+/// when the last clone is dropped. A [`Subscription`](crate::Subscription),
+/// [`RemoteTable`](crate::RemoteTable), [`Advisories`](crate::Advisories) or
+/// [`Provided`](crate::provider::Provided) holds a clone too, so it keeps
+/// the connection open while it lives.
 ///
 /// ```no_run
 /// # async fn demo() -> rbus::Result<()> {

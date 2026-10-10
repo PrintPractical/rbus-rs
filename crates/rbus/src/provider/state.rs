@@ -244,11 +244,14 @@ impl<T> fmt::Debug for Event<T> {
 /// ```
 /// use rbus::provider::{Row, Table};
 ///
+/// # #[cfg(feature = "macros")]
 /// #[derive(rbus::Row, Clone, PartialEq, Default)]
 /// struct Host {
 ///     name: String,
 /// }
 ///
+/// # #[cfg(not(feature = "macros"))] fn main() {}
+/// # #[cfg(feature = "macros")]
 /// # fn main() -> rbus::Result<()> {
 /// let hosts: Table<Host> = Table::new();
 /// let id = hosts.insert(Host { name: "laptop".into() })?;      // OBJECT_CREATED, once registered
@@ -600,5 +603,6 @@ impl<R: fmt::Debug> fmt::Debug for Table<R> {
     }
 }
 
-#[cfg(test)]
+// The tests use the derives.
+#[cfg(all(test, feature = "macros"))]
 mod tests;

@@ -19,8 +19,8 @@ use crate::types::IntoValue;
 /// provider when it is registered; [`Provided::handle`](crate::provider::Provided::handle)
 /// returns another. It is cheap to clone. It doesn't keep the connection or
 /// the provider alive: once the provider is dropped, every call fails with
-/// [`Status::ElementDoesNotExist`] (or [`Error::Disconnected`] once the
-/// connection is gone), and `publish` calls do nothing.
+/// [`Status::ElementDoesNotExist`], or with [`Error::Disconnected`] once the
+/// connection is gone.
 #[derive(Clone)]
 pub struct Handle {
     core: Weak<Core>,

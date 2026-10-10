@@ -25,8 +25,9 @@
 //!   strings work too and are checked at the call.
 //! - Scalars convert through [`RbusType`]; structured data through serde
 //!   ([`to_object`], [`from_object`]).
-//! - Every failure is an [`Error`].
-//! - To serve a data model, derive [`Model`] (or write a
+//! - Every call fails with an [`Error`]; a subscription stream yields
+//!   [`EventError`] items for events it lost or couldn't convert.
+//! - To serve a data model, derive [`provider::Model`] (or write a
 //!   [`provider::Provider`] another way) and register it with
 //!   [`Rbus::provide`].
 //!
@@ -54,9 +55,9 @@ mod types;
 #[cfg(test)]
 mod engine_tests;
 
-// The README's examples compile as doctests.
-#[cfg(doctest)]
-#[doc = include_str!("../../../README.md")]
+// The README's examples compile as doctests. They use the macros.
+#[cfg(all(doctest, feature = "macros"))]
+#[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
 pub use bus::{DEFAULT_SOCKET, Rbus, RbusBuilder, Timeouts};

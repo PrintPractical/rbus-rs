@@ -654,6 +654,7 @@ async fn pt2_a_data_model_numbers_consumer_rows_above_its_own() {
     }
 }
 
+#[cfg(feature = "macros")]
 mod rows {
     use super::*;
     use crate::provider::{Event, Table};

@@ -179,7 +179,8 @@ impl Transaction {
     /// ```
     /// use rbus::provider::{Change, Transaction};
     ///
-    /// let tx: Transaction = [Change::new(rbus::name!("Device.A"), 1u32)].into_iter().collect();
+    /// let name = rbus::PropertyName::from_static("Device.A");
+    /// let tx: Transaction = [Change::new(name, 1u32)].into_iter().collect();
     /// assert_eq!(tx.len(), 1);
     /// ```
     pub fn new(changes: Vec<Change>) -> Self {
