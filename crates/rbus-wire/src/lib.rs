@@ -4,3 +4,15 @@
 //! frames and back. Every C wire quirk (NUL-terminated strings, raw native-memory
 //! values, legacy CCSP codes) is confined here.
 #![forbid(unsafe_code)]
+
+pub mod body;
+pub mod control;
+pub mod error;
+pub mod event;
+pub mod frame;
+pub mod message;
+pub mod msgpack;
+pub mod status;
+pub mod value;
+
+pub use error::{Error, Result};
