@@ -825,3 +825,5 @@ async fn m1_m3_invoke() {
         Err(Error::Name(_))
     ));
 }
+
+mod events;

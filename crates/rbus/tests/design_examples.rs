@@ -1,5 +1,5 @@
-//! The design.md section 4 examples that M2 implements, run against real
-//! providers. Element names are swapped for ones the C peers serve. The
+//! The design.md section 4 examples implemented so far (M2, M3), run against
+//! real providers. Element names are swapped for ones the C peers serve. The
 //! `name!` macro (M6) and `.reconnect(..)` (M7) arrive with their milestones.
 //! Run with `scripts/interop.sh`.
 
@@ -130,5 +130,112 @@ async fn design_4_6_consumer_get_set_invoke() -> rbus::Result<()> {
     // Methods (M1, M3): serde in, serde out.
     let reply: Named = bus.invoke("Device.TestProvider.MethodAsync1()", ()).await?;
     assert_eq!(reply.name, "MethodAsync1()");
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct PartialRow {
+    #[serde(rename = "Param1")]
+    param1: String,
+}
+
+/// 4.6 Consumer API: trees, tables and discovery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn design_4_6_trees_tables_discovery() -> rbus::Result<()> {
+    let _t = test_provider();
+    let bus = Rbus::connect("com.example.trees").await?;
+
+    // Partial path and wildcard (C3, C4): a tree you can walk or deserialize
+    let tree = bus.get_tree("Device.TestProvider.PartialPath1.").await?;
+    let rows: Vec<PartialRow> = tree.deserialize()?;
+    assert_eq!(rows.len(), 2);
+    assert!(rows[1].param1.ends_with(".2.Param1"));
+    let params = bus
+        .get_tree("Device.TestProvider.PartialPath1.*.Param1")
+        .await?;
+    for (name, value) in params.iter() {
+        assert_eq!(value, &Value::String(name.to_owned()));
+    }
+    assert!(tree.failures().is_empty()); // C5
+
+    // Tables (T1–T3)
+    let hosts = bus.table("Device.TestProvider.Table1.");
+    let row = hosts.add_row().alias("design-guest").await?;
+    assert!(hosts.rows().await?.iter().any(|r| r.inst == row.inst));
+    hosts.remove_row(&row).await?;
+
+    // Discovery (D1, D2, D4, D5)
+    let owner = bus
+        .discover()
+        .owner("Device.TestProvider.Value.INT32")
+        .await?;
+    assert_eq!(owner, "TestProvider");
+    let names = bus.discover().elements("TestProvider").await?;
+    assert!(!names.is_empty());
+    let comps = bus.discover().components().await?;
+    assert!(comps.contains(&owner));
+    let _adv = bus.discover().advisories(); // Stream<Advisory>
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct Tick {
+    index: i32,
+}
+
+/// 4.7 Subscriptions as typed streams.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn design_4_7_subscriptions() -> rbus::Result<()> {
+    use rbus::{EventError, Retry, RowEvent};
+
+    let _t = test_provider();
+    let bus = Rbus::connect("com.example.events").await?;
+
+    // Property value changes (E3, E9)
+    let mut enable = bus
+        .subscribe_value::<u32>("Device.TestProvider.Value.UINT32")
+        .initial_value() // the first item is the current value
+        .await?;
+    match tokio::time::timeout(Duration::from_secs(5), enable.next())
+        .await
+        .expect("initial value")
+    {
+        Some(Ok(change)) => assert_eq!((change.old, change.new), (None, 10_000_000)),
+        Some(Err(EventError::Lagged(n))) => panic!("dropped {n}"),
+        other => panic!("{other:?}"),
+    }
+
+    // Table rows (E4)
+    let mut rows = bus.subscribe_table("Device.TestProvider.Table1.").await?; // Added(RowId) or Removed(RowId)
+    let table = bus.table("Device.TestProvider.Table1.");
+    let row = table.add_row().alias("design-e4").await?;
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(10), rows.next())
+            .await
+            .expect("row event")
+            .expect("open")
+            .expect("decodes");
+        if matches!(&ev, RowEvent::Added { row: r, .. } if r.inst == row.inst) {
+            break;
+        }
+    }
+    table.remove_row(&row).await?;
+
+    // General events, decoded with serde (E5, E10)
+    let mut ticks = bus
+        .subscribe::<Tick>("Device.TestProvider.Event1!")
+        .retry(Retry::exponential().max_elapsed(Duration::from_secs(60)))
+        .buffer(128)
+        .await?;
+    let tick = tokio::time::timeout(Duration::from_secs(10), ticks.next())
+        .await
+        .expect("an event")
+        .expect("open")
+        .expect("decodes");
+    assert!(tick.index >= 0);
+
+    ticks.unsubscribe().await?; // or just drop it
     Ok(())
 }

@@ -88,3 +88,18 @@ async fn l13_dropping_the_last_handle_unregisters() {
         "still routed after drop: {routes}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn l13_close_unsubscribes_and_ends_streams() {
+    let _provider = test_provider();
+    let bus = connect("l13-subs").await;
+    let mut events = bus
+        .subscribe::<rbus::Object>("Device.TestProvider.Event1!")
+        .await
+        .unwrap();
+    common::within(10, events.next()).await.unwrap().unwrap();
+    bus.close().await.unwrap();
+    // Whatever was queued drains, then the stream ends.
+    while common::within(5, events.next()).await.is_some() {}
+}
