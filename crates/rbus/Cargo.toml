@@ -1,0 +1,20 @@
+[package]
+name = "rbus"
+description = "Async, unsafe-free Rust client and provider for RDK's RBUS, speaking the rtrouted wire protocol directly."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rbus-wire = { path = "../rbus-wire" }
+rbus-macros = { path = "../rbus-macros", optional = true }
+
+[features]
+default = ["macros"]
+macros = ["dep:rbus-macros"]
+
+[lints]
+workspace = true
