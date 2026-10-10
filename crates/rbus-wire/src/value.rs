@@ -29,7 +29,7 @@ use crate::error::{Error, Result};
 use crate::msgpack::{Reader, Writer};
 
 /// The `rbusValueType_t` type tags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum TypeTag {
     /// `RBUS_BOOLEAN`
@@ -130,6 +130,60 @@ pub enum Value {
 }
 
 impl Value {
+    /// Compares two values the way `rbusValue_Compare` does (`rbus_value.c:909`),
+    /// which is what filters and value-change detection use:
+    ///
+    /// - numbers, booleans and chars compare as `f64`, whatever their types;
+    /// - other values of different types order by type tag;
+    /// - strings compare byte-wise (`strcmp`), bytes as `memcmp` then length;
+    /// - date-times compare as UTC instants. C's own comparison is broken
+    ///   here (any two different date-times compare equal); this one isn't.
+    /// - property lists, objects and `None` are only equal or not (unequal
+    ///   reads as greater).
+    pub fn compare(&self, other: &Value) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let (a, b) = (self.type_tag(), other.type_tag());
+        if a <= TypeTag::F64 && b <= TypeTag::F64 {
+            let (x, y) = (self.as_f64(), other.as_f64());
+            return if x == y {
+                Ordering::Equal
+            } else if x < y {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+        if a != b {
+            return a.cmp(&b);
+        }
+        match (self, other) {
+            (Value::String(x), Value::String(y)) => x.as_bytes().cmp(y.as_bytes()),
+            (Value::Bytes(x), Value::Bytes(y)) => x.as_ref().cmp(y.as_ref()),
+            (Value::DateTime(x), Value::DateTime(y)) => x.utc_key().cmp(&y.utc_key()),
+            _ if self == other => Ordering::Equal,
+            _ => Ordering::Greater,
+        }
+    }
+
+    /// A numeric value as `f64` (`rbusValue_CoerceNumericToDouble`); 0 for
+    /// anything else.
+    fn as_f64(&self) -> f64 {
+        match *self {
+            Value::Bool(v) => f64::from(u8::from(v)),
+            Value::Char(v) | Value::Byte(v) | Value::U8(v) => f64::from(v),
+            Value::I8(v) => f64::from(v),
+            Value::I16(v) => f64::from(v),
+            Value::U16(v) => f64::from(v),
+            Value::I32(v) => f64::from(v),
+            Value::U32(v) => f64::from(v),
+            Value::I64(v) => v as f64,
+            Value::U64(v) => v as f64,
+            Value::F32(v) => f64::from(v),
+            Value::F64(v) => v,
+            _ => 0.0,
+        }
+    }
+
     /// This value's type tag.
     pub fn type_tag(&self) -> TypeTag {
         match self {
@@ -420,6 +474,22 @@ pub struct DateTime {
     pub tz_west: bool,
 }
 
+impl DateTime {
+    /// A key that orders date-times by their UTC instant: the fields with
+    /// the timezone offset taken off, most significant first.
+    fn utc_key(&self) -> (i32, i32, i32, i64) {
+        let offset = i64::from(self.tz_hour) * 60 + i64::from(self.tz_min);
+        let offset = if self.tz_west { -offset } else { offset };
+        let minutes = i64::from(self.hour) * 60 + i64::from(self.min) - offset;
+        (
+            self.year,
+            self.mon,
+            self.mday,
+            minutes * 60 + i64::from(self.sec),
+        )
+    }
+}
+
 /// Size of the C struct on the wire: nine `int32_t`, two `int32_t`, a `bool`
 /// and three bytes of padding.
 pub const DATETIME_LEN: usize = 48;
@@ -583,6 +653,53 @@ fn parse_unsigned<T: std::str::FromStr>(s: &str) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn compare_follows_rbus_value_compare() {
+        use std::cmp::Ordering::*;
+        assert_eq!(Value::I32(3).compare(&Value::I64(3)), Equal);
+        assert_eq!(Value::U8(2).compare(&Value::F32(2.5)), Less);
+        assert_eq!(Value::Bool(true).compare(&Value::I16(0)), Greater);
+        assert_eq!(Value::Char(b'a').compare(&Value::Byte(97)), Equal);
+        assert_eq!(Value::I8(-1).compare(&Value::U16(1)), Less);
+        assert_eq!(Value::U32(9).compare(&Value::U64(9)), Equal);
+        assert_eq!(Value::F64(f64::NAN).compare(&Value::F64(1.0)), Greater);
+        assert_eq!(
+            Value::from("a").compare(&Value::I32(1)),
+            Greater,
+            "by type tag"
+        );
+        assert_eq!(Value::from("abc").compare(&Value::from("abd")), Less);
+        let b = |v: &'static [u8]| Value::Bytes(Bytes::from_static(v));
+        assert_eq!(b(b"ab").compare(&b(b"abc")), Less);
+        assert_eq!(b(b"b").compare(&b(b"abc")), Greater);
+        let t = |hour, tz_hour, tz_west| {
+            Value::DateTime(DateTime {
+                year: 124,
+                mday: 1,
+                hour,
+                tz_hour,
+                tz_west,
+                ..DateTime::default()
+            })
+        };
+        assert_eq!(
+            t(12, 2, false).compare(&t(10, 0, false)),
+            Equal,
+            "same instant"
+        );
+        assert_eq!(t(12, 2, true).compare(&t(12, 0, false)), Greater);
+        assert_eq!(t(1, 0, false).compare(&t(2, 0, false)), Less);
+        let o = Value::Object(Object::new());
+        assert_eq!(o.compare(&o.clone()), Equal);
+        assert_eq!(
+            o.compare(&Value::Object(Object::new().with("x", 1i32))),
+            Greater
+        );
+        assert_eq!(Value::None.compare(&Value::None), Equal);
+        assert_eq!(Value::from("x").as_f64(), 0.0);
+    }
+
     use super::*;
 
     fn round_trip(v: &Value) -> Vec<u8> {

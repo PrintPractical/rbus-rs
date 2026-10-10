@@ -169,11 +169,28 @@ impl Provider for Bare {
     }
 }
 
+/// An outbox that drops everything.
+struct NoOut;
+
+impl Outbox for NoOut {
+    fn component(&self) -> &str {
+        "test.provider"
+    }
+    fn send_event(&self, _inbox: &str, _payload: Vec<u8>) {}
+    fn watch_disconnects(&self) {}
+}
+
+impl Registry {
+    async fn handle_test(&self, req: Request, cx: Context) -> Vec<u8> {
+        self.handle(req, cx, &NoOut).await
+    }
+}
+
 fn registry() -> (Registry, Arc<Fake>) {
     let r = Registry::default();
     let fake = Arc::new(Fake::new());
     r.mount(fake.schema(), fake.clone(), false).unwrap();
-    r.add_local_row(0, "A.T.", RowId::from(1)).unwrap();
+    r.add_local_row(0, "A.T.", RowId::from(1), &NoOut).unwrap();
     r.add_local_row(
         0,
         "A.T.",
@@ -181,6 +198,7 @@ fn registry() -> (Registry, Arc<Fake>) {
             inst: 2,
             alias: Some("two".into()),
         },
+        &NoOut,
     )
     .unwrap();
     (r, fake)
@@ -202,7 +220,7 @@ async fn get(r: &Registry, names: &[&str]) -> GetResponse {
         requesting_component: "caller".into(),
         names: names.iter().map(|n| n.to_string()).collect(),
     };
-    decode(r.handle(Request::Get(req), cx()).await)
+    decode(r.handle_test(Request::Get(req), cx()).await)
 }
 
 fn props(resp: &GetResponse) -> Vec<(&str, &Value)> {
@@ -279,7 +297,7 @@ async fn pt8_partial_paths_and_wildcards() {
         [("A.T.2.X", &Value::I32(2))]
     );
     // A wildcard needs every property it names.
-    r.add_local_row(0, "A.T.", RowId::from(3)).unwrap();
+    r.add_local_row(0, "A.T.", RowId::from(3), &NoOut).unwrap();
     let missing = get(&r, &["A.T.*.X"]).await;
     assert_eq!(status(missing.status), Status::ElementDoesNotExist);
     assert_eq!(props(&get(&r, &["A.T."]).await).len(), 2);
@@ -319,7 +337,7 @@ fn set_req(props: &[(&str, Value)], commit: bool, session: u32) -> Request {
 }
 
 async fn set(r: &Registry, props: &[(&str, Value)]) -> SetResponse {
-    decode(r.handle(set_req(props, true, 0), cx()).await)
+    decode(r.handle_test(set_req(props, true, 0), cx()).await)
 }
 
 #[tokio::test]
@@ -382,19 +400,19 @@ async fn c7_sets_are_one_transaction_checked_against_the_schema() {
 async fn d8_legacy_sessions_are_buffered_until_commit() {
     let (r, fake) = registry();
     let resp: SetResponse = decode(
-        r.handle(set_req(&[("A.Name", Value::from("x"))], false, 7), cx())
+        r.handle_test(set_req(&[("A.Name", Value::from("x"))], false, 7), cx())
             .await,
     );
     assert_eq!(resp.status, 0);
     assert!(fake.calls().is_empty(), "nothing applied before the commit");
     // Another session commits on its own.
     let other: SetResponse = decode(
-        r.handle(set_req(&[("A.T.1.X", Value::I32(9))], true, 8), cx())
+        r.handle_test(set_req(&[("A.T.1.X", Value::I32(9))], true, 8), cx())
             .await,
     );
     assert_eq!(other.status, 0);
     let resp: SetResponse = decode(
-        r.handle(set_req(&[("A.T.2.X", Value::I32(3))], true, 7), cx())
+        r.handle_test(set_req(&[("A.T.2.X", Value::I32(3))], true, 7), cx())
             .await,
     );
     assert_eq!(resp.status, 0);
@@ -418,7 +436,7 @@ async fn sets_spanning_two_providers_go_to_each() {
     assert_eq!(fake.calls().len(), 1, "the first provider was called");
     // Buffered sets of an unmounted provider are dropped.
     let _: SetResponse = decode(
-        r.handle(set_req(&[("B.P", Value::U8(2))], false, 0), cx())
+        r.handle_test(set_req(&[("B.P", Value::U8(2))], false, 0), cx())
             .await,
     );
     r.unmount(1);
@@ -433,7 +451,7 @@ async fn names(r: &Registry, name: &str, depth: i32, mode: NamesMode) -> Vec<u8>
         depth,
         mode,
     };
-    r.handle(Request::Names(req), cx()).await
+    r.handle_test(Request::Names(req), cx()).await
 }
 
 #[tokio::test]
@@ -475,7 +493,7 @@ async fn add(r: &Registry, table: &str, alias: Option<&str>) -> AddRowResponse {
         table: table.into(),
         alias: alias.map(str::to_owned),
     };
-    decode(r.handle(Request::AddRow(req), cx()).await)
+    decode(r.handle_test(Request::AddRow(req), cx()).await)
 }
 
 async fn remove(r: &Registry, row: &str) -> Status {
@@ -483,7 +501,7 @@ async fn remove(r: &Registry, row: &str) -> Status {
         session_id: 0,
         row: row.into(),
     };
-    let resp: StatusResponse = decode(r.handle(Request::RemoveRow(req), cx()).await);
+    let resp: StatusResponse = decode(r.handle_test(Request::RemoveRow(req), cx()).await);
     status(resp.status)
 }
 
@@ -538,7 +556,7 @@ async fn pt2_consumers_add_and_remove_rows() {
             alias: Some("two".into())
         }]
     );
-    r.add_local_row(0, "A.F.", RowId::from(1)).unwrap();
+    r.add_local_row(0, "A.F.", RowId::from(1), &NoOut).unwrap();
     assert_eq!(remove(&r, "A.F.1.").await, Status::InvalidOperation);
     // The trait's defaults refuse.
     r.mount(Bare.schema(), Arc::new(Bare), false).unwrap();
@@ -546,7 +564,7 @@ async fn pt2_consumers_add_and_remove_rows() {
         status(add(&r, "B.T.", None).await.status),
         Status::InvalidOperation
     );
-    r.add_local_row(1, "B.T.", RowId::from(4)).unwrap();
+    r.add_local_row(1, "B.T.", RowId::from(4), &NoOut).unwrap();
     assert_eq!(remove(&r, "B.T.4.").await, Status::InvalidOperation);
 }
 
@@ -555,30 +573,30 @@ async fn pt3_provider_owned_rows() {
     let (r, _) = registry();
     r.mount(Bare.schema(), Arc::new(Bare), false).unwrap();
     assert_eq!(
-        r.add_local_row(1, "A.T.", RowId::from(5)),
+        r.add_local_row(1, "A.T.", RowId::from(5), &NoOut),
         Err(Status::AccessNotAllowed)
     );
     assert_eq!(
-        r.add_local_row(7, "B.T.", RowId::from(5)),
+        r.add_local_row(7, "B.T.", RowId::from(5), &NoOut),
         Err(Status::AccessNotAllowed)
     );
     assert_eq!(
-        r.add_local_row(0, "A.Nope.", RowId::from(5)),
+        r.add_local_row(0, "A.Nope.", RowId::from(5), &NoOut),
         Err(Status::ElementDoesNotExist)
     );
     assert_eq!(
-        r.add_local_row(0, "A.T.", RowId::from(1)),
+        r.add_local_row(0, "A.T.", RowId::from(1), &NoOut),
         Err(Status::ElementNameDuplicate)
     );
     assert_eq!(
-        r.remove_local_row(1, "A.T.", 1),
+        r.remove_local_row(1, "A.T.", 1, &NoOut),
         Err(Status::AccessNotAllowed)
     );
     assert_eq!(
-        r.remove_local_row(0, "A.T.", 9),
+        r.remove_local_row(0, "A.T.", 9, &NoOut),
         Err(Status::ElementDoesNotExist)
     );
-    assert_eq!(r.remove_local_row(0, "A.T.", 1), Ok(()));
+    assert_eq!(r.remove_local_row(0, "A.T.", 1, &NoOut), Ok(()));
     assert_eq!(r.rows("A.T.").unwrap().len(), 1);
     assert_eq!(r.rows("A.Name"), Err(Status::ElementDoesNotExist));
     r.unmount(0);
@@ -591,7 +609,7 @@ async fn invoke(r: &Registry, method: &str, input: Option<Object>) -> RpcRespons
         method: method.into(),
         input,
     };
-    decode(r.handle(Request::Rpc(req), cx()).await)
+    decode(r.handle_test(Request::Rpc(req), cx()).await)
 }
 
 #[tokio::test]
@@ -664,8 +682,6 @@ fn p19_other_methods_get_a_bare_status() {
     };
     assert_eq!(status(Method::Commit), 0);
     assert_eq!(status(Method::GetParameterAttributes), 0);
-    assert_eq!(status(Method::Subscribe), Status::InvalidOperation.code());
-    assert_eq!(status(Method::Unsubscribe), Status::InvalidOperation.code());
     assert_eq!(status(Method::OpenDirectConn), UNSUPPORTED_METHOD);
     assert_eq!(status(Method::CloseDirectConn), UNSUPPORTED_METHOD);
     assert_eq!(status(Method::Other("METHOD_X".into())), UNSUPPORTED_METHOD);

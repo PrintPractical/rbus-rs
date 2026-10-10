@@ -55,6 +55,28 @@ const LOGIC_OR: i32 = 1;
 const LOGIC_NOT: i32 = 2;
 
 impl Filter {
+    /// True if `value` passes the filter (`rbusFilter_Apply`), comparing with
+    /// [`Value::compare`].
+    pub fn matches(&self, value: &Value) -> bool {
+        use std::cmp::Ordering::*;
+        match self {
+            Filter::Relation { op, value: operand } => {
+                let c = value.compare(operand);
+                match op {
+                    RelationOp::GreaterThan => c == Greater,
+                    RelationOp::GreaterThanOrEqual => c != Less,
+                    RelationOp::LessThan => c == Less,
+                    RelationOp::LessThanOrEqual => c != Greater,
+                    RelationOp::Equal => c == Equal,
+                    RelationOp::NotEqual => c != Equal,
+                }
+            }
+            Filter::And(a, b) => a.matches(value) && b.matches(value),
+            Filter::Or(a, b) => a.matches(value) || b.matches(value),
+            Filter::Not(a) => !a.matches(value),
+        }
+    }
+
     /// Writes the filter (`rbusFilter_AppendToMessage`).
     pub fn encode(&self, w: &mut Writer) {
         match self {
@@ -239,6 +261,48 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
+
+    fn rel(op: RelationOp, v: Value) -> Filter {
+        Filter::Relation { op, value: v }
+    }
+
+    #[test]
+    fn filters_apply_like_rbus_filter_apply() {
+        // rbusTestConsumer --Filter: (v > 10 || v < -10) || (v < 5 && v > -5).
+        let f = Filter::Or(
+            Box::new(Filter::Or(
+                Box::new(rel(RelationOp::GreaterThan, Value::I32(10))),
+                Box::new(rel(RelationOp::LessThan, Value::I32(-10))),
+            )),
+            Box::new(Filter::And(
+                Box::new(rel(RelationOp::LessThan, Value::I32(5))),
+                Box::new(rel(RelationOp::GreaterThan, Value::I32(-5))),
+            )),
+        );
+        for i in -12..=12 {
+            let want = !(-10..=10).contains(&i) || (-4..=4).contains(&i);
+            assert_eq!(f.matches(&Value::I32(i)), want, "{i}");
+            // Numbers compare across types.
+            assert_eq!(f.matches(&Value::F64(f64::from(i))), want, "{i}");
+        }
+        let s = |v: &str| Value::String(v.into());
+        for (op, v, want) in [
+            (RelationOp::GreaterThan, "eeee", true),
+            (RelationOp::GreaterThanOrEqual, "dddd", true),
+            (RelationOp::LessThan, "dddd", false),
+            (RelationOp::LessThanOrEqual, "cccc", true),
+            (RelationOp::Equal, "dddd", true),
+            (RelationOp::NotEqual, "dddd", false),
+        ] {
+            assert_eq!(rel(op, s("dddd")).matches(&s(v)), want, "{op:?} {v}");
+        }
+        assert!(
+            Filter::Not(Box::new(rel(RelationOp::Equal, Value::Bool(true)))).matches(&Value::U8(0))
+        );
+        // A string never equals a number; types order by tag.
+        assert!(rel(RelationOp::GreaterThan, Value::I32(1)).matches(&s("1")));
+    }
+
     use super::*;
 
     fn filter_round_trip(f: &Filter) -> Vec<u8> {

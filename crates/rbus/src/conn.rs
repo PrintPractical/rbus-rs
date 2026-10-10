@@ -93,6 +93,8 @@ pub(crate) struct Core {
     pub(crate) registry: crate::provider::Registry,
     /// The component's route id; element aliases are registered under it.
     pub(crate) component_route: u32,
+    /// The component name.
+    pub(crate) component: String,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -153,6 +155,13 @@ impl Core {
     pub(crate) fn send_control<T: serde::Serialize>(&self, msg: &T) -> Result<()> {
         let header = Header::new(self.next_seq(), Flags::NONE, control::TOPIC_SUBSCRIBE, "");
         self.queue(&Frame::new(header, control::encode(msg)))
+    }
+
+    /// Sends a plain rbus message (an event) to `topic`, with our component
+    /// as the reply topic, as `rbus_publishSubscriberEvent` does.
+    pub(crate) fn send_message(&self, topic: &str, payload: Vec<u8>) -> Result<()> {
+        let header = Header::new(self.next_seq(), Flags::RAW_BINARY, topic, &self.component);
+        self.queue(&Frame::new(header, payload))
     }
 
     /// Sends a request and returns a handle to await its response. The request
@@ -279,6 +288,9 @@ impl Core {
             Err(e) => return warn!(error = %e, "bad advisory from rtrouted"),
         };
         trace!(?advisory, "advisory");
+        if let Advisory::Disconnected { inbox } = &advisory {
+            self.registry.client_gone(inbox);
+        }
         if matches!(&advisory, Advisory::Connected { inbox } if *inbox != self.inbox)
             && !lock(&self.subs).is_empty()
         {
@@ -318,7 +330,6 @@ impl Core {
 /// A connection to rtrouted, registered as one component.
 pub(crate) struct Conn {
     core: Arc<Core>,
-    component: String,
     reader: JoinHandle<()>,
     resubscriber: JoinHandle<()>,
 }
@@ -400,13 +411,13 @@ impl Conn {
             resubscribe: resubscribe.clone(),
             registry: crate::provider::Registry::default(),
             component_route: NEXT_COMPONENT_ROUTE.fetch_add(1, Ordering::Relaxed),
+            component: component.to_owned(),
         });
         tokio::spawn(writer(write, rx, Arc::downgrade(&core)));
         let reader = tokio::spawn(reader(read, core.clone()));
         let resubscriber = tokio::spawn(resubscriber(Arc::downgrade(&core), resubscribe));
         let conn = Conn {
             core,
-            component: component.to_owned(),
             reader,
             resubscriber,
         };

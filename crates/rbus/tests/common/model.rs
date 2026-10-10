@@ -13,11 +13,12 @@ use rbus::provider::{
 use rbus::{MethodName, Object, PropertyName, Rbus, RowId, Status, TablePath, Value};
 use serde::{Deserialize, Serialize};
 
-/// `Device.<Root>.`: `Enable`, `Name`, `Uptime` (read-only, counts up),
+/// `Device.<Root>.`: `Enable`, `Name`, `Uptime` (read-only, counts up on
+/// every read, polled every second),
 /// `Secret` (write-only), `Slow` (read-only, takes 300 ms), `Caller`
 /// (read-only, the requesting component), `Radio.{i}.` (consumers may add
-/// and remove rows) with `Channel` and `Status`, and the methods `Echo()`,
-/// `Fail()` and `Radio.{i}.Reset()`.
+/// and remove rows) with `Channel` and `Status`, the methods `Echo()`,
+/// `Fail()` and `Radio.{i}.Reset()`, and the event `Alarm!`.
 pub struct Sample {
     root: String,
     values: Mutex<HashMap<String, Value>>,
@@ -95,6 +96,7 @@ impl Provider for Sample {
             .property(self.name("Enable"), Access::ReadWrite)
             .property(self.name("Name"), Access::ReadWrite)
             .property(self.name("Uptime"), Access::ReadOnly)
+            .poll(Duration::from_secs(1))
             .property(self.name("Secret"), Access::WriteOnly)
             .property(self.name("Slow"), Access::ReadOnly)
             .property(self.name("Caller"), Access::ReadOnly)
@@ -104,6 +106,7 @@ impl Provider for Sample {
             .method(self.name("Radio.{i}.Reset()"))
             .method(self.name("Echo()"))
             .method(self.name("Fail()"))
+            .event(self.name("Alarm!"))
     }
 
     async fn get(&self, cx: &Context, name: &PropertyName) -> Result<Value, Fault> {

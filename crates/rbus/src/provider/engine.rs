@@ -11,12 +11,13 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use rbus_wire::body::{
     AddRowRequest, AddRowResponse, DeleteRowRequest, ElementNamesResponse, GetRequest, GetResponse,
     NamesMode, NamesRequest, RowName, RowNamesResponse, RpcRequest, RpcResponse, SetRequest,
-    SetResponse, StatusResponse,
+    SetResponse, StatusResponse, SubscribeRequest,
 };
 use rbus_wire::frame::{Flags, Frame, Header};
 use rbus_wire::message::{Body, Method, response_payload, split_method_payload};
@@ -29,12 +30,43 @@ use crate::error::Status;
 use crate::name::{MethodName, PropertyName, TablePath};
 use crate::provider::Provider;
 use crate::provider::context::{Change, Context, Transaction};
+use crate::provider::events::{SubscriberInfo, SubscriberStore, SubscriptionEvent};
 use crate::provider::fault::{Fault, SetFault};
 use crate::provider::model::{
     Found, Model, MountId, NodeKind, Resolved, SchemaError, Target, Tree,
 };
 use crate::provider::schema::{Rows, Schema};
+use crate::queue::Queue;
 use crate::subscribe::RowId;
+
+mod subs;
+
+pub(crate) use subs::poller;
+
+/// Where the engine sends what it publishes. The connection implements it;
+/// tests record what would be sent.
+pub(crate) trait Outbox: Send + Sync {
+    /// Our component name: events name it as the publisher.
+    fn component(&self) -> &str;
+    /// Sends an event message to a subscriber's inbox.
+    fn send_event(&self, inbox: &str, payload: Vec<u8>);
+    /// Makes sure the broker tells us when clients disconnect, so their
+    /// subscriptions can be dropped.
+    fn watch_disconnects(&self);
+}
+
+impl Outbox for Core {
+    fn component(&self) -> &str {
+        &self.component
+    }
+    fn send_event(&self, inbox: &str, payload: Vec<u8>) {
+        // A failure means the connection is closing.
+        let _ = self.send_message(inbox, payload);
+    }
+    fn watch_disconnects(&self) {
+        let _ = self.ensure_advisories();
+    }
+}
 
 /// `RBUSCORE_ERROR_UNSUPPORTED_METHOD`: what `rbus_sendResponse` answers for
 /// a request no handler took (`rbuscore.c:2404`), and what we answer for
@@ -69,6 +101,11 @@ pub(crate) trait DynProvider: Send + Sync {
         cx: &'a Context,
         table: &'a TablePath,
         row: &'a RowId,
+    ) -> BoxFuture<'a, Result<(), Fault>>;
+    fn on_subscribe<'a>(
+        &'a self,
+        cx: &'a Context,
+        subscriber: &'a SubscriberInfo,
     ) -> BoxFuture<'a, Result<(), Fault>>;
 }
 
@@ -107,12 +144,22 @@ impl<P: Provider> DynProvider for P {
     ) -> BoxFuture<'a, Result<(), Fault>> {
         Box::pin(Provider::remove_row(self, cx, table, row))
     }
+    fn on_subscribe<'a>(
+        &'a self,
+        cx: &'a Context,
+        subscriber: &'a SubscriberInfo,
+    ) -> BoxFuture<'a, Result<(), Fault>> {
+        Box::pin(Provider::on_subscribe(self, cx, subscriber))
+    }
 }
 
 /// A registered provider.
 struct Mount {
     schema: Schema,
     handler: Handler,
+    /// Streams of subscription changes (P8).
+    listeners: Vec<Weak<Queue<SubscriptionEvent>>>,
+    store: Arc<dyn SubscriberStore>,
 }
 
 /// What serves a mount's requests: the provider, and the lock that orders
@@ -146,6 +193,13 @@ struct State {
     /// Uncommitted sets, by caller and session id.
     sessions: HashMap<(String, u32), Vec<Buffered>>,
     next_mount: MountId,
+    /// Every subscription to every provider (M5).
+    subs: Vec<subs::Sub>,
+    next_sub_id: u32,
+    /// The last value subscribers saw of each watched property.
+    values: HashMap<String, Value>,
+    /// When each polled property is next due.
+    poll_due: HashMap<String, tokio::time::Instant>,
 }
 
 impl State {
@@ -171,6 +225,7 @@ impl State {
 #[derive(Default)]
 pub(crate) struct Registry {
     state: Mutex<State>,
+    poller_started: AtomicBool,
 }
 
 /// One property to read for a get.
@@ -193,6 +248,8 @@ enum Request {
     AddRow(AddRowRequest),
     RemoveRow(DeleteRowRequest),
     Rpc(RpcRequest),
+    /// Subscribe (true) or unsubscribe (false).
+    Subscribe(SubscribeRequest, bool),
     /// Answered with a bare status.
     Status(i32),
 }
@@ -208,10 +265,8 @@ impl Request {
             Method::Rpc => Request::Rpc(RpcRequest::decode(r)?),
             // rbus providers have nothing to commit or report (`rbus.c:2879-2899`).
             Method::Commit | Method::GetParameterAttributes => Request::Status(0),
-            // The subscription registry arrives with M5.
-            Method::Subscribe | Method::Unsubscribe => {
-                Request::Status(Status::InvalidOperation.code())
-            }
+            Method::Subscribe => Request::Subscribe(SubscribeRequest::decode(r)?, true),
+            Method::Unsubscribe => Request::Subscribe(SubscribeRequest::decode(r)?, false),
             // Direct mode is out of scope (P19, D14).
             _ => Request::Status(UNSUPPORTED_METHOD),
         })
@@ -241,11 +296,28 @@ impl Registry {
 
     /// Adds a provider. Fails if its schema is malformed or overlaps a
     /// provider already registered.
+    #[cfg(test)]
     pub(crate) fn mount(
         &self,
         schema: Schema,
         provider: Arc<dyn DynProvider>,
         serialized: bool,
+    ) -> Result<MountId, SchemaError> {
+        self.mount_with(
+            schema,
+            provider,
+            serialized,
+            Arc::new(crate::provider::NoStore),
+        )
+    }
+
+    /// [`Registry::mount`] with a subscriber store.
+    pub(crate) fn mount_with(
+        &self,
+        schema: Schema,
+        provider: Arc<dyn DynProvider>,
+        serialized: bool,
+        store: Arc<dyn SubscriberStore>,
     ) -> Result<MountId, SchemaError> {
         let mut state = self.state();
         let id = state.next_mount;
@@ -260,14 +332,23 @@ impl Registry {
                     provider,
                     serial: serialized.then(|| Arc::new(tokio::sync::Mutex::new(()))),
                 },
+                listeners: Vec::new(),
+                store,
             },
         ));
         Ok(id)
     }
 
-    /// Removes a provider, its rows and its buffered sets.
+    /// Removes a provider, its rows, its subscribers and its buffered sets.
+    /// Its subscription streams end.
     pub(crate) fn unmount(&self, id: MountId) {
         let mut state = self.state();
+        state.subs.retain(|s| s.mount != Some(id));
+        if let Some((_, m)) = state.mounts.iter().find(|(m, _)| *m == id) {
+            for q in m.listeners.iter().filter_map(Weak::upgrade) {
+                q.close();
+            }
+        }
         state.mounts.retain(|(m, _)| *m != id);
         // A subset of a valid set of schemas is valid.
         let tree = state.rebuild(None).unwrap_or_default();
@@ -276,10 +357,18 @@ impl Registry {
             pending.retain(|b| b.owner != id);
         }
         state.sessions.retain(|_, p| !p.is_empty());
+        state.prune_values();
     }
 
-    /// Adds a row on the provider's behalf (PT3).
-    pub(crate) fn add_local_row(&self, id: MountId, table: &str, row: RowId) -> Result<(), Status> {
+    /// Adds a row on the provider's behalf (PT3) and publishes
+    /// `OBJECT_CREATED` (PT9).
+    pub(crate) fn add_local_row(
+        &self,
+        id: MountId,
+        table: &str,
+        row: RowId,
+        out: &dyn Outbox,
+    ) -> Result<(), Status> {
         let mut state = self.state();
         let (t, r) = state.model.resolve_table(table)?;
         if state.model.tree.node(t).owner.is_some_and(|o| o != id)
@@ -287,7 +376,9 @@ impl Registry {
         {
             return Err(Status::AccessNotAllowed);
         }
-        state.model.add_row(&r.canonical, row)
+        state.model.add_row(&r.canonical, row.clone())?;
+        state.row_event(out, &r.canonical, &row, true);
+        Ok(())
     }
 
     /// Removes a row on the provider's behalf.
@@ -296,17 +387,20 @@ impl Registry {
         id: MountId,
         table: &str,
         inst: u32,
+        out: &dyn Outbox,
     ) -> Result<(), Status> {
         let mut state = self.state();
         let (t, r) = state.model.resolve_table(table)?;
         if state.model.tree.node(t).owner.is_some_and(|o| o != id) {
             return Err(Status::AccessNotAllowed);
         }
-        state
+        let row = state
             .model
             .remove_row(&r.canonical, inst)
-            .map(drop)
-            .ok_or(Status::ElementDoesNotExist)
+            .ok_or(Status::ElementDoesNotExist)?;
+        state.row_event(out, &r.canonical, &row, false);
+        state.prune_values();
+        Ok(())
     }
 
     /// The rows of a table.
@@ -317,16 +411,17 @@ impl Registry {
     }
 
     /// Serves one request and returns the response payload.
-    async fn handle(&self, req: Request, cx: Context) -> Vec<u8> {
+    async fn handle(&self, req: Request, cx: Context, out: &dyn Outbox) -> Vec<u8> {
         match req {
             Request::Get(r) => response_payload(&self.get(r, cx).await),
-            Request::Set(r) => response_payload(&self.set(r, cx).await),
+            Request::Set(r) => response_payload(&self.set(r, cx, out).await),
             Request::Names(r) => self.names(r),
-            Request::AddRow(r) => response_payload(&self.add_row(r, cx).await),
+            Request::AddRow(r) => response_payload(&self.add_row(r, cx, out).await),
             Request::RemoveRow(r) => response_payload(&StatusResponse {
-                status: self.remove_row(r, cx).await,
+                status: self.remove_row(r, cx, out).await,
             }),
             Request::Rpc(r) => response_payload(&self.invoke(r, cx).await),
+            Request::Subscribe(r, added) => self.subscribe(r, added, cx, out).await,
             Request::Status(status) => response_payload(&StatusResponse { status }),
         }
     }
@@ -464,7 +559,7 @@ impl Registry {
         Ok(planned)
     }
 
-    async fn set(&self, req: SetRequest, cx: Context) -> SetResponse {
+    async fn set(&self, req: SetRequest, cx: Context, out: &dyn Outbox) -> SetResponse {
         let fail = |status: Status, name: String| SetResponse {
             status: wire_status(status),
             old_values: Vec::new(),
@@ -517,8 +612,17 @@ impl Registry {
             let tx = Transaction {
                 changes: group.into_iter().map(|b| b.change).collect(),
             };
-            let _guard = handler.lock().await;
-            if let Err(fault) = handler.provider.set(&cx, tx).await {
+            let changed: Vec<(PropertyName, Vec<u32>)> = tx
+                .changes
+                .iter()
+                .map(|c| (c.name.clone(), c.instances.clone()))
+                .collect();
+            self.before_set(out, &handler, &tx.changes).await;
+            let result = {
+                let _guard = handler.lock().await;
+                handler.provider.set(&cx, tx).await
+            };
+            if let Err(fault) = result {
                 debug!(%fault, "set failed");
                 let name = fault
                     .name()
@@ -526,6 +630,8 @@ impl Registry {
                     .map_or(first, |(_, r)| r.clone());
                 return fail(fault.fault().status(), name);
             }
+            self.after_set(out, &handler, changed, cx.caller().unwrap_or_default())
+                .await;
         }
         SetResponse {
             status: 0,
@@ -583,7 +689,7 @@ impl Registry {
     }
 
     /// `METHOD_ADDTBLROW` (`_table_add_row_callback_handler`).
-    async fn add_row(&self, req: AddRowRequest, cx: Context) -> AddRowResponse {
+    async fn add_row(&self, req: AddRowRequest, cx: Context, out: &dyn Outbox) -> AddRowResponse {
         let fail = |status: Status| AddRowResponse {
             status: wire_status(status),
             instance: Some(0),
@@ -634,11 +740,15 @@ impl Registry {
             inst,
             alias: req.alias,
         };
-        match self.state().model.add_row(&r.canonical, row) {
-            Ok(()) => AddRowResponse {
-                status: 0,
-                instance: Some(inst),
-            },
+        let mut state = self.state();
+        match state.model.add_row(&r.canonical, row.clone()) {
+            Ok(()) => {
+                state.row_event(out, &r.canonical, &row, true);
+                AddRowResponse {
+                    status: 0,
+                    instance: Some(inst),
+                }
+            }
             Err(status) => {
                 warn!(%table, inst, "provider returned an instance number or alias in use");
                 fail(status)
@@ -647,7 +757,7 @@ impl Registry {
     }
 
     /// `METHOD_DELETETBLROW` (`_table_remove_row_callback_handler`).
-    async fn remove_row(&self, req: DeleteRowRequest, cx: Context) -> i32 {
+    async fn remove_row(&self, req: DeleteRowRequest, cx: Context, out: &dyn Outbox) -> i32 {
         let planned = {
             let state = self.state();
             state.model.resolve_row(&req.row).and_then(|(t, inst, r)| {
@@ -689,7 +799,11 @@ impl Registry {
                 return wire_status(fault.status());
             }
         }
-        self.state().model.remove_row(&table, row.inst);
+        let mut state = self.state();
+        if let Some(row) = state.model.remove_row(&table, row.inst) {
+            state.row_event(out, &table, &row, false);
+            state.prune_values();
+        }
         0
     }
 
@@ -786,7 +900,14 @@ pub(crate) async fn serve(core: Arc<Core>, frame: Frame) {
         _ => None,
     };
     let cx = Context::new(caller, frame.header.reply_topic.clone(), span.clone());
-    let payload = core.registry.handle(request, cx).instrument(span).await;
+    if matches!(request, Request::Subscribe(_, true)) && core.registry.start_poller() {
+        tokio::spawn(poller(Arc::downgrade(&core)));
+    }
+    let payload = core
+        .registry
+        .handle(request, cx, &*core)
+        .instrument(span)
+        .await;
     let header = Header::new(
         frame.header.seq,
         Flags::RESPONSE | Flags::RAW_BINARY,

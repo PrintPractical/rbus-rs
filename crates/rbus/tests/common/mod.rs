@@ -102,3 +102,76 @@ pub fn rbuscli_values(out: &str) -> Vec<(String, String)> {
     }
     found
 }
+
+/// An interactive `rbuscli -i` session: commands go to its stdin, and its
+/// output is collected until [`Rbuscli::finish`].
+pub struct Rbuscli {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    out: std::thread::JoinHandle<String>,
+}
+
+impl Rbuscli {
+    pub fn start() -> Rbuscli {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("rbuscli")
+            .arg("-i")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run rbuscli -i");
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let out = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = stdout.read_to_string(&mut s);
+            s.replace('\r', "")
+        });
+        Rbuscli { child, stdin, out }
+    }
+
+    /// Sends one command line.
+    pub fn send(&mut self, line: &str) {
+        use std::io::Write;
+        writeln!(self.stdin, "{line}").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    /// Quits and returns everything it printed.
+    pub async fn finish(mut self) -> String {
+        self.send("quit");
+        tokio::task::spawn_blocking(move || {
+            drop(self.stdin);
+            let _ = self.child.wait();
+            self.out.join().unwrap()
+        })
+        .await
+        .unwrap()
+    }
+}
+
+/// The events `rbuscli` printed, one block per event: the "Event received"
+/// line and the data lines after it, up to a blank line.
+pub fn rbuscli_events(out: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+    for line in out.lines() {
+        let line = line.trim_start_matches("rbuscli> ");
+        if line.starts_with("Event received") {
+            if let Some(ev) = current.take() {
+                events.push(ev.join("\n"));
+            }
+            current = Some(vec![line]);
+        } else if let Some(ev) = &mut current {
+            if line.trim().is_empty() && ev.len() > 1 {
+                events.push(current.take().unwrap().join("\n"));
+            } else if !line.trim().is_empty() {
+                ev.push(line);
+            }
+        }
+    }
+    events.extend(current.map(|ev| ev.join("\n")));
+    events
+}

@@ -17,6 +17,7 @@
 //! Results always use canonical names: instance numbers, never aliases.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use rbus_wire::body::ElementName;
 
@@ -99,6 +100,8 @@ pub(crate) struct Node {
     /// The provider that registered this element; `None` for implicit
     /// objects and tables.
     pub(crate) owner: Option<MountId>,
+    /// How often to poll a property for value changes.
+    pub(crate) poll: Option<Duration>,
     children: Vec<NodeId>,
 }
 
@@ -127,6 +130,7 @@ impl Default for Tree {
                 seg: String::new(),
                 kind: NodeKind::Object,
                 owner: None,
+                poll: None,
                 children: Vec::new(),
             }],
         }
@@ -181,6 +185,7 @@ impl Tree {
             seg: seg.to_owned(),
             kind,
             owner: None,
+            poll: None,
             children: Vec::new(),
         });
         self.nodes[parent].children.push(id);
@@ -206,8 +211,8 @@ impl Tree {
             ElementKind::Method if !leaf.ends_with("()") || leaf.len() == 2 => {
                 return Err(bad(name, "a method name must end in \"()\""));
             }
-            ElementKind::Event if !leaf.ends_with('!') || leaf.len() == 1 => {
-                return Err(bad(name, "an event name must end in '!'"));
+            ElementKind::Event if leaf.ends_with("()") || leaf == "!" => {
+                return Err(bad(name, "an event name can't end in \"()\""));
             }
             ElementKind::Property(_) | ElementKind::Table(_)
                 if leaf.ends_with("()") || leaf.ends_with('!') =>
@@ -218,6 +223,9 @@ impl Tree {
         }
         if leaf == "{i}" || !plain(leaf.trim_end_matches("()").trim_end_matches('!')) {
             return Err(bad(name, "a segment holds a reserved character"));
+        }
+        if e.poll().is_some() && !matches!(e.kind(), ElementKind::Property(_)) {
+            return Err(bad(name, "only properties can be polled"));
         }
         let mut cur = ROOT;
         let mut in_table = false;
@@ -275,6 +283,7 @@ impl Tree {
         let node = &mut self.nodes[id];
         node.kind = kind;
         node.owner = Some(mount);
+        node.poll = e.poll();
         Ok(())
     }
 }
@@ -422,6 +431,19 @@ impl Model {
     /// Resolves a name that may hold `*`, to every match. A trailing `.` must
     /// lead to an object, table or row.
     pub(crate) fn resolve_all(&self, name: &str) -> Result<Vec<Resolved>, Status> {
+        self.expand(name, false)
+    }
+
+    /// Like [`Model::resolve_all`], but the branches of a `*` that don't fit
+    /// the rest of the name are dropped instead of failing it: for
+    /// `T.*.U.[x].V`, the rows of `T` whose `U` has no row `x`. This is how
+    /// subscriptions match (`TokenChain_match`); gets fail instead, as
+    /// `rbus.c` does.
+    pub(crate) fn resolve_matching(&self, name: &str) -> Vec<Resolved> {
+        self.expand(name, true).unwrap_or_default()
+    }
+
+    fn expand(&self, name: &str, lenient: bool) -> Result<Vec<Resolved>, Status> {
         let name = name.strip_suffix(".*").map_or(name, |n| &name[..=n.len()]);
         let (segs, dot) = split(name);
         if segs.iter().any(|s| s.is_empty()) {
@@ -431,7 +453,10 @@ impl Model {
         for seg in segs {
             let mut next = Vec::new();
             for r in &at {
-                self.step(r, seg, &mut next)?;
+                match self.step(r, seg, &mut next) {
+                    Err(_) if lenient => {}
+                    other => other?,
+                }
             }
             at = next;
         }
@@ -452,6 +477,54 @@ impl Model {
         }
         let mut all = self.resolve_all(name)?;
         Ok(all.remove(0))
+    }
+
+    /// Resolves a subscription name against the templates only: any row
+    /// position may hold `*`, a number or an alias, existing or not. Returns
+    /// where the name leads, with `Target::Row(table, 0)` for a row.
+    pub(crate) fn resolve_template(&self, name: &str) -> Result<Target, Status> {
+        let name = name.strip_suffix(".*").map_or(name, |n| &name[..=n.len()]);
+        let (segs, dot) = split(name);
+        let mut at = Target::Node(ROOT);
+        for seg in segs {
+            if seg.is_empty() {
+                return Err(Status::ElementDoesNotExist);
+            }
+            let parent = match at {
+                Target::Table(t) => {
+                    at = Target::Row(t, 0);
+                    continue;
+                }
+                Target::Row(t, _) => t,
+                Target::Node(n) if self.tree.node(n).kind == NodeKind::Object => n,
+                Target::Node(_) => return Err(Status::ElementDoesNotExist),
+            };
+            let child = self
+                .tree
+                .child(parent, seg)
+                .ok_or(Status::ElementDoesNotExist)?;
+            at = match self.tree.node(child).kind {
+                NodeKind::Table(_) => Target::Table(child),
+                _ => Target::Node(child),
+            };
+        }
+        match at {
+            Target::Node(n) if dot && !self.tree.node(n).kind.has_children() => {
+                Err(Status::ElementDoesNotExist)
+            }
+            Target::Node(ROOT) => Err(Status::ElementDoesNotExist),
+            at => Ok(at),
+        }
+    }
+
+    /// True if the canonical name `canonical` is one of the names `pattern`
+    /// (exact, with aliases, or with `*`) stands for right now.
+    pub(crate) fn matches(&self, pattern: &str, canonical: &str) -> bool {
+        pattern == canonical
+            || self
+                .resolve_matching(pattern)
+                .iter()
+                .any(|r| r.canonical == canonical)
     }
 
     /// Resolves the path of a table (`Device.A.3.B.`, trailing `.` optional).
@@ -866,6 +939,46 @@ mod tests {
     }
 
     #[test]
+    fn subscription_names_resolve_against_templates() {
+        let m = partial_path();
+        let node = |t: Target| match t {
+            Target::Node(n) | Target::Table(n) | Target::Row(n, _) => m.tree.node(n).seg.clone(),
+        };
+        let t = m.resolve_template("D.P.*.SubTable.").unwrap();
+        assert!(matches!(t, Target::Table(_)));
+        assert_eq!(node(t), "SubTable");
+        // Rows need not exist.
+        let p = m.resolve_template("D.P.[nope].SubTable.9.Param5").unwrap();
+        assert_eq!(node(p), "Param5");
+        assert!(matches!(
+            m.resolve_template("D.P.7."),
+            Ok(Target::Row(_, 0))
+        ));
+        assert!(matches!(m.resolve_template("D.P.*"), Ok(Target::Table(_))));
+        for bad in ["D.Q", "D.W.", "D.P.1.Param1.X", "", "D..P", "D.W.X"] {
+            assert_eq!(
+                m.resolve_template(bad),
+                Err(Status::ElementDoesNotExist),
+                "{bad}"
+            );
+        }
+        assert!(m.matches("D.P.*.SubTable.", "D.P.2.SubTable."));
+        assert!(m.matches("D.P.[two].Param1", "D.P.2.Param1"));
+        assert!(!m.matches("D.P.[two].Param1", "D.P.1.Param1"));
+        assert!(!m.matches("D.Q.", "D.Q.1."));
+        // A row alias that only some rows of a `*` have.
+        let mut m = partial_path();
+        m.add_row("D.P.2.SubTable.", row(9, Some("nine"))).unwrap();
+        assert!(m.matches("D.P.*.SubTable.[nine].Param5", "D.P.2.SubTable.9.Param5"));
+        assert!(
+            m.resolve_all("D.P.*.SubTable.[nine].Param5").is_err(),
+            "gets stay strict"
+        );
+        assert_eq!(m.resolve_matching("D.P.*.SubTable.[nine].Param5").len(), 1);
+        assert!(m.resolve_matching("D.Q.*").is_empty());
+    }
+
+    #[test]
     fn schemas_are_checked() {
         let one = |s: Schema| Tree::build([(1, s.elements())]).map(|_| ());
         let bad_name = |s: Schema| matches!(one(s), Err(SchemaError::Name(_)));
@@ -873,7 +986,11 @@ mod tests {
         assert!(bad_name(Schema::new().property("A.B()", Access::ReadOnly)));
         assert!(bad_name(Schema::new().method("A.B")));
         assert!(bad_name(Schema::new().method("A.()")));
-        assert!(bad_name(Schema::new().event("A.B")));
+        assert!(bad_name(Schema::new().event("A.B()")));
+        assert!(bad_name(
+            Schema::new().method("A.M()").poll(Duration::from_secs(1))
+        ));
+        assert!(Tree::build([(1, Schema::new().event("A.T.{i}.Event").elements())]).is_ok());
         assert!(bad_name(Schema::new().property("A.*.B", Access::ReadOnly)));
         assert!(bad_name(
             Schema::new().property("A.[x].B", Access::ReadOnly)

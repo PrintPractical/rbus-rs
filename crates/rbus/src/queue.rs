@@ -92,6 +92,21 @@ impl<T> Queue<T> {
         }
     }
 
+    /// Adds an item without waiting: when full, drops the oldest item and
+    /// counts it as lagged, whatever the overflow policy.
+    pub(crate) fn push_now(&self, item: T) {
+        let mut s = self.lock();
+        if s.closed {
+            return;
+        }
+        if s.items.len() >= self.capacity {
+            s.items.pop_front();
+            s.lagged += 1;
+        }
+        s.items.push_back(item);
+        Self::wake(&mut s);
+    }
+
     /// Adds an item ahead of everything queued (an initial value that must
     /// come before events that raced it). Never blocks; may exceed capacity by one.
     pub(crate) fn push_front(&self, item: T) {

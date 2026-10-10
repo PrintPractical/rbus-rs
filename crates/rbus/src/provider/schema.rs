@@ -1,5 +1,7 @@
 //! The elements a provider registers.
 
+use std::time::Duration;
+
 /// Who may read and write a property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Access {
@@ -52,6 +54,7 @@ pub enum ElementKind {
 pub struct Element {
     name: String,
     kind: ElementKind,
+    poll: Option<Duration>,
 }
 
 impl Element {
@@ -63,6 +66,11 @@ impl Element {
     /// The kind of element.
     pub fn kind(&self) -> ElementKind {
         self.kind
+    }
+
+    /// How often the engine polls this property for value changes, if at all.
+    pub fn poll(&self) -> Option<Duration> {
+        self.poll
     }
 }
 
@@ -99,6 +107,7 @@ impl Schema {
         self.elements.push(Element {
             name: name.into(),
             kind,
+            poll: None,
         });
         self
     }
@@ -122,9 +131,27 @@ impl Schema {
         self.with(name, ElementKind::Method)
     }
 
-    /// Adds an event; its name ends in `!`.
+    /// Adds an event. Event names normally end in `!`, but C providers
+    /// also register plain names (`Device.X.{i}.Event`), so either works.
     pub fn event(self, name: impl Into<String>) -> Self {
         self.with(name, ElementKind::Event)
+    }
+
+    /// Polls the property added last every `every`, and publishes a
+    /// value-change event to its subscribers when the value differs (P10).
+    /// C does this for every subscribed property (every 2 s); here it is
+    /// opt-in, for values that change without the provider knowing, such as
+    /// hardware counters. Changes made by a consumer's set are published
+    /// without polling, and the provider can publish its own with
+    /// [`Provided::notify_changed`](crate::provider::Provided::notify_changed)
+    /// or [`Provided::publish_value_change`](crate::provider::Provided::publish_value_change).
+    ///
+    /// Registration fails if the last element isn't a property.
+    pub fn poll(mut self, every: Duration) -> Self {
+        if let Some(last) = self.elements.last_mut() {
+            last.poll = Some(every);
+        }
+        self
     }
 
     /// The elements, in order.
@@ -147,5 +174,11 @@ mod tests {
         assert_eq!(s.elements()[1].kind(), ElementKind::Table(Rows::Dynamic));
         assert!(Access::ReadWrite.readable() && Access::ReadWrite.writable());
         assert!(!Access::WriteOnly.readable() && !Access::ReadOnly.writable());
+        let p = Schema::new()
+            .property("A.P", Access::ReadOnly)
+            .poll(Duration::from_secs(2));
+        assert_eq!(p.elements()[0].poll(), Some(Duration::from_secs(2)));
+        assert_eq!(s.elements()[0].poll(), None);
+        assert!(Schema::new().poll(Duration::ZERO).elements().is_empty());
     }
 }

@@ -15,7 +15,13 @@ failures. That shows C consumers can't tell the Rust provider from the C one.
 | `--Methods` | M4 | 55 | none |
 | `--Tables` | M4 | 1228 | none |
 | `--PartialPath` | M4 | 252 | none |
-| `--Events`, `--Subscribe`, `--ValueChange`, `--Filter` | M5 | | not run yet |
+| `--Filter` | M5 | 54 | none |
+| `--ValueChange` | M5 | 66 | none |
+| `--Events` | M5 | 69 | none |
+| `--Subscribe` | M5 | 53 | none |
+
+The provider registers as component `TestProvider`, like the C one, because
+`--ValueChange` checks that value-change events name it as `by`.
 
 The check counts were taken from `rbusTestProvider` at the pinned rbus commit
 (`e8cf808`). If the pin moves, recount them.
@@ -40,6 +46,20 @@ None of these is visible to the groups above:
   `getBigHandler` tests `strstr(..) == 0`. Here each one keeps its own value.
   The `--Value` group sets them before reading them, so the swap never
   shows.
-- **Not served yet (M5):** the events (`Event1!`, `Event2!`, ...), the
-  value-change properties (`VCParam*`, `NoAutoPubInt`), `EventsTable`,
-  `TableReg` and `ResetTables`. The M5 groups use them.
+- **Polling.** C polls every subscribed property every 2 s. Here only the
+  properties whose values change without a set (`VCParam*`, `VCParamBy`,
+  `EventsTable.{i}.Prop`) are declared with `Schema::poll(2 s)`. Changes made
+  by a consumer's set are published at once, so the `by` checks see them
+  sooner than with C.
+- **The main loop.** `rbusTestProvider`'s `main` publishes `Event1!`,
+  `Event2!`, `EventsTable.{i}.Event` and `NoAutoPubInt` every second while
+  they have subscribers, adds the `TableReg` rows once they are subscribed
+  to, and registers `ProviderNotFoundEvent1!` 20 s after
+  `TestProviderNotFound` is set. `main_loop` does the same, asking
+  `Provided::subscribers` where C counts in its subscribe handlers; the late
+  event is a second provider on the same connection.
+- **`ErrorSubHandlerEvent!`** is refused in `Provider::on_subscribe`, where C
+  refuses it in its subscribe handler.
+- **`ResetTables`** is accepted and does nothing. The C provider resets its
+  own copy of the rows, but the library's rows (which consumers see) stay;
+  each group here runs against a fresh provider anyway.
