@@ -1,0 +1,49 @@
+# Interop test image: the C reference implementation (rtrouted, rbuscli, sample
+# apps, rbusTestProvider/rbusTestConsumer) built from the pinned
+# third_party/rbus submodule, plus a Rust toolchain to run our tests against it.
+#
+# Built as Debug, like upstream's devcontainer: Release optimisation trips -Werror
+# (stringop-truncation) in a sample app with Ubuntu 22.04's GCC.
+#
+# Two builds of rbus are installed, because the MSG_ROUNDTRIP_TIME compile
+# option changes the size of the fixed wire header:
+#   /opt/rbus     device-style build, 32-byte headers (the default on PATH)
+#   /opt/rbus-rt  MSG_ROUNDTRIP_TIME=ON, 72-byte headers (desktop builds)
+#
+# Build context is the repository root:
+#   docker build -f tests/interop/Containerfile -t rbus-rs-interop .
+
+FROM ubuntu:22.04 AS base
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates cmake curl git \
+        libcjson-dev libmsgpack-dev pkg-config procps \
+    && rm -rf /var/lib/apt/lists/*
+# rbuscli links against linenoise, which Ubuntu does not package.
+RUN git clone --depth 1 --branch 2.0 https://github.com/antirez/linenoise.git /tmp/linenoise \
+    && cd /tmp/linenoise \
+    && cc -fPIC -shared -o liblinenoise.so linenoise.c \
+    && install -m 755 liblinenoise.so /usr/lib/ \
+    && install -m 644 linenoise.h /usr/include/ \
+    && ldconfig && rm -rf /tmp/linenoise
+
+FROM base AS rbus
+COPY third_party/rbus /src/rbus
+RUN cmake -S /src/rbus -B /build/rbus -DCMAKE_BUILD_TYPE=Debug -DBUILD_FOR_DESKTOP=OFF \
+        -DCMAKE_INSTALL_PREFIX=/opt/rbus \
+    && cmake --build /build/rbus -j"$(nproc)" && cmake --install /build/rbus
+RUN cmake -S /src/rbus -B /build/rbus-rt -DCMAKE_BUILD_TYPE=Debug -DBUILD_FOR_DESKTOP=OFF \
+        -DMSG_ROUNDTRIP_TIME=ON -DCMAKE_INSTALL_PREFIX=/opt/rbus-rt \
+    && cmake --build /build/rbus-rt -j"$(nproc)" && cmake --install /build/rbus-rt
+
+FROM base
+COPY --from=rbus /opt/rbus /opt/rbus
+COPY --from=rbus /opt/rbus-rt /opt/rbus-rt
+ENV PATH=/opt/rbus/bin:/root/.cargo/bin:$PATH \
+    LD_LIBRARY_PATH=/opt/rbus/lib \
+    RBUS_PREFIX=/opt/rbus \
+    RBUS_RT_PREFIX=/opt/rbus-rt
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component llvm-tools-preview \
+    && curl -sSfL "https://github.com/taiki-e/cargo-llvm-cov/releases/latest/download/cargo-llvm-cov-$(uname -m)-unknown-linux-gnu.tar.gz" \
+       | tar xzf - -C /root/.cargo/bin
+WORKDIR /work

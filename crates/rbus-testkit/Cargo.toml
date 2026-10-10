@@ -1,0 +1,12 @@
+[package]
+name = "rbus-testkit"
+description = "Test-only tooling for rbus-rs: frame recorder and helpers for interop tests against rtrouted."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true

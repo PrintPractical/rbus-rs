@@ -48,4 +48,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
-  # Interop tests against the real rtrouted are added once the interop container exists.
+  # Unit + interop tests against the real rtrouted (built from the pinned
+  # third_party/rbus submodule), run under cargo-llvm-cov.
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tests/interop/Containerfile
+          tags: rbus-rs-interop
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Interop tests with coverage
+        run: scripts/interop.sh coverage
+        env:
+          INTEROP_SKIP_BUILD: "1"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: target/interop/lcov.info
+          if-no-files-found: error

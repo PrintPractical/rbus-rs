@@ -15,5 +15,9 @@ name = "rbus-macros"
 version = "0.0.0"
 
 [[package]]
+name = "rbus-testkit"
+version = "0.0.0"
+
+[[package]]
 name = "rbus-wire"
 version = "0.0.0"
