@@ -24,6 +24,8 @@ pub struct Limits {
     /// The most items (properties, children, names, rows) one payload may
     /// announce, in total. Default 100 000. Decoded items take far more
     /// memory than their encoding, so this bounds what one payload costs.
+    /// `rbus` also uses it to bound the uncommitted set values one caller
+    /// may leave with a provider.
     pub max_items: usize,
 }
 

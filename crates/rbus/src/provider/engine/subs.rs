@@ -135,15 +135,11 @@ impl State {
         self.mounts.iter().find(|(m, _)| *m == id).map(|(_, m)| m)
     }
 
-    /// Tells the mount's listeners and store about a change.
+    /// Tells the mount's listeners about a change, and marks its store for
+    /// saving once the lock is released ([`Registry::flush_saves`]): the
+    /// store is the user's code, which may block or call back in.
     fn changed(&mut self, mount: Option<MountId>, event: SubscriptionEvent) {
         let Some(id) = mount else { return };
-        let subscribers: Vec<SubscriberInfo> = self
-            .subs
-            .iter()
-            .filter(|s| s.mount == Some(id))
-            .map(|s| s.info.clone())
-            .collect();
         if let Some(m) = self
             .mounts
             .iter_mut()
@@ -154,8 +150,49 @@ impl State {
             for q in m.listeners.iter().filter_map(Weak::upgrade) {
                 q.push_now(event.clone());
             }
-            m.store.save(&subscribers);
+            if !self.unsaved.contains(&id) {
+                self.unsaved.push(id);
+            }
         }
+    }
+
+    /// A mount's store and its current subscribers.
+    pub(super) fn snapshot(
+        &self,
+        id: MountId,
+    ) -> Option<(Arc<dyn SubscriberStore>, Vec<SubscriberInfo>)> {
+        let m = self.mount(id)?;
+        let subscribers = self
+            .subs
+            .iter()
+            .filter(|s| s.mount == Some(id))
+            .map(|s| s.info.clone())
+            .collect();
+        Some((m.store.clone(), subscribers))
+    }
+
+    /// Removes a row with everything under it, publishes `OBJECT_DELETED`,
+    /// and drops the exact subscriptions to anything in it, as C does
+    /// (`rbus_subscriptions.c:308-390`). Patterns stay: later rows may
+    /// match them.
+    pub(super) fn remove_row(&mut self, out: &dyn Outbox, table: &str, inst: u32) -> Option<RowId> {
+        let prefix = format!("{table}{inst}.");
+        // Resolved before the row goes, while its alias still resolves.
+        let doomed: Vec<u32> = self
+            .subs
+            .iter()
+            .filter(|s| !s.info.event.contains('*') && !s.info.event.contains("{i}"))
+            .filter(|s| {
+                self.model
+                    .resolve(&s.info.event)
+                    .is_ok_and(|r| r.canonical.starts_with(&prefix))
+            })
+            .map(|s| s.info.id)
+            .collect();
+        let row = self.model.remove_row(table, inst)?;
+        self.row_event(out, table, &row, false);
+        self.remove_subs(|s| doomed.contains(&s.info.id));
+        Some(row)
     }
 
     /// Removes the subscriptions `remove` picks, telling everyone, and drops
@@ -359,7 +396,6 @@ impl Registry {
             };
         }
         if let Some(handler) = &handler {
-            let _guard = handler.lock().await;
             if let Err(fault) = handler.provider.on_subscribe(&cx, &info).await {
                 debug!(event = %info.event, %fault, "subscription refused by the provider");
                 return refused(Status::from_wire(wire_status(fault.status())));
@@ -423,7 +459,6 @@ impl Registry {
     async fn read(&self, handler: &Handler, found: &Found, cx: Context) -> Option<Value> {
         let name: PropertyName = name_of(&found.name).ok()?;
         let cx = cx.with_instances(found.instances.clone());
-        let _guard = handler.lock().await;
         handler.provider.get(&cx, &name).await.ok()
     }
 
@@ -514,7 +549,12 @@ impl Registry {
 
     /// A client left the bus: drop its subscriptions (`rbusSubscriptions_handleClientDisconnect`).
     pub(crate) fn client_gone(&self, inbox: &str) {
-        let n = self.state().remove_subs(|s| s.info.inbox == inbox);
+        let n = {
+            let mut state = self.state();
+            // Its uncommitted sets can never be committed now.
+            state.sessions.retain(|(caller, _), _| caller != inbox);
+            state.remove_subs(|s| s.info.inbox == inbox)
+        };
         if n > 0 {
             debug!(inbox, subscriptions = n, "subscriber disconnected");
         }
@@ -522,27 +562,45 @@ impl Registry {
 
     /// Restores the subscribers a store kept, skipping those whose process
     /// is gone (`rbusSubscriptions_loadCache`).
-    pub(crate) fn restore(&self, id: MountId, out: &dyn Outbox) {
+    ///
+    /// Returns true if it restored any, so the caller starts the poller
+    /// that value changes need.
+    pub(crate) fn restore(&self, id: MountId, out: &dyn Outbox) -> bool {
         let Some(store) = self.state().mount(id).map(|m| m.store.clone()) else {
-            return;
+            return false;
         };
+        // Outside the lock: the store is the user's code.
+        let loaded = store.load();
         let mut restored = 0;
-        for info in store.load() {
+        for info in loaded {
             let mut state = self.state();
-            if !listener_running(&info.inbox) || state.subs.iter().any(|s| s.info == info) {
+            // The D35 key: a consumer may have subscribed again already.
+            let same = |s: &Sub| {
+                s.info.inbox == info.inbox
+                    && s.info.component_id == info.component_id
+                    && s.info.event == info.event
+                    && s.info.filter == info.filter
+            };
+            if !listener_running(&info.inbox) || state.subs.iter().any(same) {
                 continue;
             }
             let Ok((kind, mount)) = state.plan_subscription(&info.event) else {
                 continue;
             };
             state.next_sub_id = state.next_sub_id.max(3).max(info.id + 1);
-            state.subs.push(Sub { info, kind, mount });
+            state.subs.push(Sub {
+                info: info.clone(),
+                kind,
+                mount,
+            });
+            state.changed(mount, SubscriptionEvent::Added(info));
             restored += 1;
         }
         if restored > 0 {
             debug!(restored, "subscribers restored");
             out.watch_disconnects();
         }
+        restored > 0
     }
 
     /// Subscriptions a provider's elements have. With a name, only those

@@ -196,4 +196,13 @@ pub trait Row: Clone + PartialEq + Send + Sync + 'static {
     /// Adds `(path, old, new)` for every value that differs from `old`,
     /// with paths below `prefix`. Tables and events are skipped.
     fn diff(&self, old: &Self, prefix: &str, changes: &mut Vec<(String, Value, Value)>);
+
+    /// True if a table or event inside the row is connected to a registered
+    /// row already. Clones share them, so inserting a clone of a row would
+    /// take them away from the original; [`Table::insert`] refuses that.
+    ///
+    /// [`Table::insert`]: crate::provider::Table::insert
+    fn is_bound(&self) -> bool {
+        false
+    }
 }

@@ -104,7 +104,7 @@ pub use rbus_wire::event::{Filter, RelationOp};
 pub use schema::{Access, Element, ElementKind, Rows, Schema};
 pub use state::{Event, Prop, Table};
 
-pub(crate) use engine::{Registry, serve};
+pub(crate) use engine::{Registry, dispatch, ensure_poller};
 pub(crate) use handle::element_error;
 
 use crate::name::{MethodName, PropertyName, TablePath};

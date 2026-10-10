@@ -185,6 +185,11 @@ impl<T> Event<T> {
         lock(&self.bound).clone()
     }
 
+    /// True once the event is connected to a registered name.
+    pub fn is_bound(&self) -> bool {
+        lock(&self.bound).is_some()
+    }
+
     /// The consumers subscribed to this event (P8).
     pub fn subscribers(&self) -> Vec<SubscriberInfo> {
         self.bound()
@@ -304,12 +309,28 @@ impl<R: Row> TableState<R> {
                 return Err(status_of(a, Status::ElementNameDuplicate));
             }
         }
+        // A clone of a row in a table shares its tables and events; this row
+        // would take them over.
+        if row.is_bound() {
+            return Err(status_of(
+                &self.row_name(self.next),
+                Status::InvalidOperation,
+            ));
+        }
         let id = RowId {
             inst: self.next,
             alias,
         };
         if let Some(b) = &self.bound {
-            b.handle.add_row(b.name.as_str(), id.clone())?;
+            match b.handle.add_row(b.name.as_str(), id.clone()) {
+                Ok(()) => {}
+                // Kept, as `Prop::set` keeps a value: the state is the
+                // app's, whatever the connection does.
+                Err(Error::Disconnected) => {
+                    debug!(table = %b.name, inst = id.inst, "row kept; not connected");
+                }
+                Err(e) => return Err(e),
+            }
             row.bind(&format!("{}{}.", b.name, id.inst), Some(&b.handle));
         }
         self.next += 1;
@@ -446,6 +467,11 @@ impl<R: Row> Table<R> {
 
     // The rest is for the code `#[derive(Model)]` and `#[derive(Row)]`
     // generate.
+
+    /// True once the table is connected to a registered path.
+    pub fn is_bound(&self) -> bool {
+        self.read().bound.is_some()
+    }
 
     /// Connects the table to its registered path (`Device.WiFi.Radio.`) and
     /// records the rows it already has, or disconnects it with `None`.

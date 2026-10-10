@@ -621,8 +621,9 @@ impl Model {
         out
     }
 
-    fn names_rec(&self, at: &Resolved, depth: i32, level: i32, out: &mut Vec<ElementName>) {
-        let max = depth.abs();
+    fn names_rec(&self, at: &Resolved, depth: i32, level: u32, out: &mut Vec<ElementName>) {
+        // Unsigned: the depth comes off the wire, and `i32::MIN.abs()` overflows.
+        let max = depth.unsigned_abs();
         if depth >= 0 || level == max {
             let (element_type, access) = match at.target {
                 Target::Node(n) => {
@@ -905,6 +906,15 @@ mod tests {
         assert_eq!((w[0].element_type, w[0].access), (1, 18));
         let root = m.element_names(&Resolved::root(), -1);
         assert_eq!(root[0].name, "D.");
+        // Extreme depths from the wire neither overflow nor recurse forever.
+        assert!(
+            m.element_names(&m.resolve("D.").unwrap(), i32::MIN)
+                .is_empty()
+        );
+        assert_eq!(
+            m.element_names(&m.resolve("D.").unwrap(), i32::MAX),
+            m.element_names(&m.resolve("D.").unwrap(), 100),
+        );
     }
 
     #[test]

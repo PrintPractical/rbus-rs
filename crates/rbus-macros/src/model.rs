@@ -178,6 +178,8 @@ struct Gen {
     add_row: Vec<TokenStream>,
     remove_row: Vec<TokenStream>,
     bind: Vec<TokenStream>,
+    /// Expressions true when a member is in use by a registered row.
+    bound: Vec<TokenStream>,
     diff: Vec<TokenStream>,
 }
 
@@ -190,6 +192,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
         add_row: Vec::new(),
         remove_row: Vec::new(),
         bind: Vec::new(),
+        bound: Vec::new(),
         diff: Vec::new(),
     };
     // Rows are borrowed mutably to set them; models are not.
@@ -316,6 +319,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                 g.bind.push(quote! {
                     self.#ident.bind(&::std::format!("{}{}.", prefix, #seg), handle);
                 });
+                g.bound.push(quote!(self.#ident.is_bound()));
             }
             Kind::Event => {
                 g.describe.push(quote! {
@@ -324,6 +328,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                 g.bind.push(quote! {
                     self.#ident.bind(::std::format!("{}{}", prefix, #seg), handle);
                 });
+                g.bound.push(quote!(self.#ident.is_bound()));
             }
             Kind::Object { ty } => {
                 g.describe.push(quote! {
@@ -350,6 +355,7 @@ fn generate(members: &[Member], derive: Derive) -> Gen {
                 g.bind.push(quote! {
                     #nested_trait::bind(&self.#ident, &::std::format!("{}{}.", prefix, #seg), handle);
                 });
+                g.bound.push(quote!(#nested_trait::is_bound(&self.#ident)));
                 if derive == Derive::Row {
                     g.diff.push(quote! {
                         #p::Row::diff(
@@ -388,6 +394,7 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
         add_row,
         remove_row,
         bind,
+        bound,
         diff,
     } = generate(&members, derive);
     let p = quote!(::rbus::provider);
@@ -446,6 +453,10 @@ pub(crate) fn derive(input: DeriveInput, derive: Derive) -> Result<TokenStream> 
                 changes: &mut ::std::vec::Vec<(::std::string::String, ::rbus::Value, ::rbus::Value)>,
             ) {
                 #(#diff)*
+            }
+
+            fn is_bound(&self) -> bool {
+                false #(|| #bound)*
             }
         },
     };

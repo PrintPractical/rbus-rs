@@ -56,6 +56,13 @@ impl<P: Provider> Provide<P> {
     /// Serves this provider's requests one at a time, in arrival order, for
     /// code written for C's single callback thread. By default each request
     /// runs as its own task.
+    ///
+    /// Each request is served whole before the next starts: a set's checks,
+    /// handler and events, or every property of a partial-path get. The
+    /// engine's own reads (value-change polling, `notify_changed`) don't wait
+    /// their turn, so a handler may call them. Like C's callback thread, a
+    /// handler must not wait on a request to its own serialized provider:
+    /// it would queue behind itself until it timed out.
     pub fn serialized(mut self) -> Self {
         self.serialized = true;
         self
@@ -122,7 +129,9 @@ impl<P: Provider> IntoFuture for Provide<P> {
                 // record the rows they start with.
                 provided.provider.attach(handle);
                 let provided = provided.register(names).await?;
-                conn.registry.restore(id, &***conn);
+                if conn.registry.restore(id, &***conn) {
+                    crate::provider::ensure_poller(conn);
+                }
                 Ok(provided)
             }
             .instrument(span)

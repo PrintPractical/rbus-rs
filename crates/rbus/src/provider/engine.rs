@@ -12,8 +12,9 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
+use rbus_wire::Limits;
 use rbus_wire::body::{
     AddRowRequest, AddRowResponse, DeleteRowRequest, ElementNamesResponse, GetRequest, GetResponse,
     NamesMode, NamesRequest, RowName, RowNamesResponse, RpcRequest, RpcResponse, SetRequest,
@@ -23,6 +24,7 @@ use rbus_wire::frame::{Flags, Frame, Header};
 use rbus_wire::message::{Body, Method, response_payload, split_method_payload};
 use rbus_wire::msgpack::Reader;
 use rbus_wire::value::{Object, Property, Value};
+use tokio::sync::mpsc;
 use tracing::{Instrument, debug, debug_span, trace, warn};
 
 use crate::conn::Core;
@@ -162,21 +164,12 @@ struct Mount {
     store: Arc<dyn SubscriberStore>,
 }
 
-/// What serves a mount's requests: the provider, and the lock that orders
-/// them if it asked to be serialized.
+/// What serves a mount's requests.
 #[derive(Clone)]
 struct Handler {
     provider: Arc<dyn DynProvider>,
-    serial: Option<Arc<tokio::sync::Mutex<()>>>,
-}
-
-impl Handler {
-    async fn lock(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
-        match &self.serial {
-            Some(m) => Some(m.lock().await),
-            None => None,
-        }
-    }
+    /// Requests that reach it run one at a time, in arrival order.
+    serialized: bool,
 }
 
 /// A set buffered until its legacy session commits (D8).
@@ -190,7 +183,8 @@ struct Buffered {
 struct State {
     mounts: Vec<(MountId, Mount)>,
     model: Model,
-    /// Uncommitted sets, by caller and session id.
+    /// Uncommitted sets, by the caller's inbox and session id. Dropped when
+    /// the caller disconnects.
     sessions: HashMap<(String, u32), Vec<Buffered>>,
     next_mount: MountId,
     /// Every subscription to every provider (M5).
@@ -200,6 +194,8 @@ struct State {
     values: HashMap<String, Value>,
     /// When each polled property is next due.
     poll_due: HashMap<String, tokio::time::Instant>,
+    /// Mounts whose subscriber stores need saving.
+    unsaved: Vec<MountId>,
 }
 
 impl State {
@@ -222,10 +218,68 @@ impl State {
 }
 
 /// Every provider on one connection, and the rows of their tables.
-#[derive(Default)]
 pub(crate) struct Registry {
     state: Mutex<State>,
+    /// Held while subscriber stores are saved.
+    saving: Mutex<()>,
     poller_started: AtomicBool,
+    /// The most set values one caller may leave uncommitted.
+    max_buffered: usize,
+    /// Feeds the worker that serves requests to serialized providers.
+    serial: OnceLock<mpsc::UnboundedSender<Job>>,
+}
+
+/// A request being served.
+type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// The locked state. Dropping it releases the lock, then saves the
+/// subscriber stores that changed.
+struct StateGuard<'a> {
+    guard: Option<MutexGuard<'a, State>>,
+    registry: &'a Registry,
+}
+
+impl std::ops::Deref for StateGuard<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        self.guard.as_ref().expect("held until dropped")
+    }
+}
+
+impl std::ops::DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        self.guard.as_mut().expect("held until dropped")
+    }
+}
+
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        let unsaved = self.guard.as_ref().is_some_and(|s| !s.unsaved.is_empty());
+        self.guard = None;
+        if unsaved {
+            self.registry.flush_saves();
+        }
+    }
+}
+
+impl Default for Registry {
+    fn default() -> Registry {
+        Registry::new(&Limits::DEFAULT)
+    }
+}
+
+impl Registry {
+    /// A registry that holds at most `limits.max_items` uncommitted set
+    /// values per caller.
+    pub(crate) fn new(limits: &Limits) -> Registry {
+        Registry {
+            state: Mutex::default(),
+            saving: Mutex::new(()),
+            poller_started: AtomicBool::new(false),
+            max_buffered: limits.max_items,
+            serial: OnceLock::new(),
+        }
+    }
 }
 
 /// One property to read for a get.
@@ -255,6 +309,20 @@ enum Request {
 }
 
 impl Request {
+    /// The names a request reaches, to find their providers.
+    fn names(&self) -> Vec<String> {
+        match self {
+            Request::Get(r) => r.names.clone(),
+            Request::Set(r) => r.properties.iter().map(|p| p.name.clone()).collect(),
+            Request::Names(r) => vec![r.name.clone()],
+            Request::AddRow(r) => vec![r.table.clone()],
+            Request::RemoveRow(r) => vec![r.row.clone()],
+            Request::Rpc(r) => vec![r.method.clone()],
+            Request::Subscribe(r, _) => vec![r.event_name.clone()],
+            Request::Status(_) => Vec::new(),
+        }
+    }
+
     fn decode(method: &Method, r: &mut Reader<'_>) -> rbus_wire::Result<Request> {
         Ok(match method {
             Method::GetParameterValues => Request::Get(GetRequest::decode(r)?),
@@ -290,7 +358,36 @@ fn name_of<N: crate::name::ElementName>(canonical: &str) -> Result<N, Status> {
 }
 
 impl Registry {
-    fn state(&self) -> MutexGuard<'_, State> {
+    /// Locks the state. Stores marked for saving meanwhile are saved when
+    /// the guard goes.
+    fn state(&self) -> StateGuard<'_> {
+        StateGuard {
+            guard: Some(self.state.lock().unwrap_or_else(|e| e.into_inner())),
+            registry: self,
+        }
+    }
+
+    /// Saves the stores [`State::changed`] marked, outside the state lock,
+    /// one save at a time and each from a fresh snapshot, so the last save
+    /// is always the latest state. A save that finds another under way
+    /// leaves its marks for that one.
+    fn flush_saves(&self) {
+        while let Ok(saving) = self.saving.try_lock() {
+            let unsaved = std::mem::take(&mut self.lock_raw().unsaved);
+            for id in unsaved {
+                let snapshot = self.lock_raw().snapshot(id);
+                if let Some((store, subscribers)) = snapshot {
+                    store.save(&subscribers);
+                }
+            }
+            drop(saving);
+            if self.lock_raw().unsaved.is_empty() {
+                return;
+            }
+        }
+    }
+
+    fn lock_raw(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -330,7 +427,7 @@ impl Registry {
                 schema,
                 handler: Handler {
                     provider,
-                    serial: serialized.then(|| Arc::new(tokio::sync::Mutex::new(()))),
+                    serialized,
                 },
                 listeners: Vec::new(),
                 store,
@@ -391,15 +488,14 @@ impl Registry {
     ) -> Result<(), Status> {
         let mut state = self.state();
         let (t, r) = state.model.resolve_table(table)?;
-        if state.model.tree.node(t).owner.is_some_and(|o| o != id) {
+        if state.model.tree.node(t).owner.is_some_and(|o| o != id)
+            || !state.mounts.iter().any(|(m, _)| *m == id)
+        {
             return Err(Status::AccessNotAllowed);
         }
-        let row = state
-            .model
-            .remove_row(&r.canonical, inst)
+        state
+            .remove_row(out, &r.canonical, inst)
             .ok_or(Status::ElementDoesNotExist)?;
-        state.row_event(out, &r.canonical, &row, false);
-        state.prune_values();
         Ok(())
     }
 
@@ -408,6 +504,57 @@ impl Registry {
         let state = self.state();
         let (_, r) = state.model.resolve_table(table)?;
         Ok(state.model.rows(&r.canonical).to_vec())
+    }
+
+    /// True if any of `names` reaches a provider that asked to be
+    /// serialized.
+    fn reaches_serialized(&self, names: &[String]) -> bool {
+        let state = self.state();
+        let serialized = |owner: Option<MountId>| {
+            owner.is_some_and(|o| {
+                state
+                    .mounts
+                    .iter()
+                    .any(|(id, m)| *id == o && m.handler.serialized)
+            })
+        };
+        if !state.mounts.iter().any(|(_, m)| m.handler.serialized) {
+            return false;
+        }
+        let model = &state.model;
+        names.iter().any(|name| {
+            let resolved = model.resolve_matching(name);
+            let owner = |t: &Target| match *t {
+                Target::Node(n) | Target::Table(n) | Target::Row(n, _) => model.tree.node(n).owner,
+            };
+            let template = model.resolve_template(name).ok();
+            serialized(template.as_ref().and_then(owner))
+                || resolved.iter().any(|r| {
+                    let node = owner(&r.target);
+                    let mut found = Vec::new();
+                    model.properties_under(r, &mut found);
+                    serialized(node)
+                        || found
+                            .iter()
+                            .any(|f| serialized(model.tree.node(f.node).owner))
+                })
+        })
+    }
+
+    /// Queues a request for the serial worker, which serves one at a time,
+    /// in the order they arrived. Each runs as its own task, so a panic in a
+    /// handler doesn't stop the worker.
+    fn run_serially(&self, job: Job) {
+        let tx = self.serial.get_or_init(|| {
+            let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
+            tokio::spawn(async move {
+                while let Some(job) = rx.recv().await {
+                    let _ = tokio::spawn(job).await;
+                }
+            });
+            tx
+        });
+        let _ = tx.send(job);
     }
 
     /// Serves one request and returns the response payload.
@@ -496,7 +643,6 @@ impl Registry {
             let result = match name_of::<PropertyName>(&read.canonical) {
                 Ok(name) => {
                     let cx = cx.with_instances(read.instances);
-                    let _guard = read.handler.lock().await;
                     read.handler.provider.get(&cx, &name).await
                 }
                 Err(s) => Err(Fault::new(s)),
@@ -572,12 +718,23 @@ impl Registry {
             Ok(p) => p,
             Err((status, name)) => return fail(status, name),
         };
-        let key = (req.component, req.session_id);
+        // By inbox, which the caller can't choose, rather than the
+        // component name in the request, which it can.
+        let key = (cx.inbox().to_owned(), req.session_id);
         // Group by provider, in the order each first appears.
         let mut groups: Vec<(Handler, Vec<Buffered>)> = Vec::new();
         {
             let mut state = self.state();
             if !req.commit {
+                let held: usize = state
+                    .sessions
+                    .iter()
+                    .filter(|((inbox, _), _)| *inbox == key.0)
+                    .map(|(_, b)| b.len())
+                    .sum();
+                if held + planned.len() > self.max_buffered {
+                    return fail(Status::OutOfResources, req.component);
+                }
                 debug!(caller = %key.0, session = key.1, "set buffered until commit");
                 state.sessions.entry(key).or_default().extend(planned);
                 return SetResponse {
@@ -618,10 +775,7 @@ impl Registry {
                 .map(|c| (c.name.clone(), c.instances.clone()))
                 .collect();
             self.before_set(out, &handler, &tx.changes).await;
-            let result = {
-                let _guard = handler.lock().await;
-                handler.provider.set(&cx, tx).await
-            };
+            let result = { handler.provider.set(&cx, tx).await };
             if let Err(fault) = result {
                 debug!(%fault, "set failed");
                 let name = fault
@@ -730,7 +884,6 @@ impl Registry {
             .map(|row| row.inst)
             .collect();
         let inst = {
-            let _guard = handler.lock().await;
             match handler
                 .provider
                 .add_row(&cx, &table, req.alias.as_deref())
@@ -815,17 +968,12 @@ impl Registry {
         };
         let cx = cx.with_instances(instances);
         {
-            let _guard = handler.lock().await;
             if let Err(fault) = handler.provider.remove_row(&cx, &path, &row).await {
                 debug!(table = %path, inst = row.inst, %fault, "remove row failed");
                 return wire_status(fault.status());
             }
         }
-        let mut state = self.state();
-        if let Some(row) = state.model.remove_row(&table, row.inst) {
-            state.row_event(out, &table, &row, false);
-            state.prune_values();
-        }
+        self.state().remove_row(out, &table, row.inst);
         0
     }
 
@@ -862,7 +1010,6 @@ impl Registry {
         let result = match name_of::<MethodName>(&r.canonical) {
             Ok(method) => {
                 let cx = cx.with_instances(r.instances);
-                let _guard = handler.lock().await;
                 handler
                     .provider
                     .invoke(&cx, &method, req.input.unwrap_or_default())
@@ -903,41 +1050,79 @@ fn error_output(mut output: Object, status: Status, text: String) -> Object {
     output
 }
 
-/// Serves one inbound request and sends the response. Runs as its own task.
-pub(crate) async fn serve(core: Arc<Core>, frame: Frame) {
-    let decoded = split_method_payload(&frame.payload, &core.limits)
-        .map(|(mut body, meta)| (Request::decode(&meta.method, &mut body), meta.method));
-    let (request, method) = match decoded {
-        Ok(d) => d,
-        Err(e) => return warn!(error = %e, topic = %frame.header.topic, "undecodable request"),
-    };
-    let span = debug_span!("rbus.serve", method = method.as_str(), topic = %frame.header.topic);
-    let request = request.unwrap_or_else(|e| {
-        warn!(parent: &span, error = %e, "malformed request body");
-        Request::Status(Status::InvalidInput.code())
-    });
-    let caller = match &request {
-        Request::Get(r) => Some(r.requesting_component.clone()),
-        Request::Set(r) => Some(r.component.clone()),
-        _ => None,
-    };
-    let cx = Context::new(caller, frame.header.reply_topic.clone(), span.clone());
-    if matches!(request, Request::Subscribe(_, true)) && core.registry.start_poller() {
-        tokio::spawn(poller(Arc::downgrade(&core)));
+/// Routes one inbound request, in arrival order: through the connection's
+/// serial worker when it reaches a serialized provider, otherwise as a task
+/// of its own. The reader calls this for every request.
+pub(crate) fn dispatch(core: &Arc<Core>, frame: Frame) {
+    let (request, method) = decode_request(&frame, &core.limits);
+    let (names, job) = serve(core.clone(), frame, request, method);
+    if core.registry.reaches_serialized(&names) {
+        core.registry.run_serially(Box::pin(job));
+    } else {
+        tokio::spawn(job);
     }
-    let payload = core
-        .registry
-        .handle(request, cx, &*core)
-        .instrument(span)
-        .await;
-    let header = Header::new(
-        frame.header.seq,
-        Flags::RESPONSE | Flags::RAW_BINARY,
-        frame.header.reply_topic,
-        frame.header.topic,
-    );
-    // A failure means the connection is closing; the caller will time out.
-    let _ = core.queue(&Frame::new(header, payload));
+}
+
+/// Starts the connection's value-change poller, once.
+pub(crate) fn ensure_poller(core: &Arc<Core>) {
+    if core.registry.start_poller() {
+        tokio::spawn(poller(Arc::downgrade(core)));
+    }
+}
+
+/// Decodes a request. One that doesn't decode is answered with
+/// `INVALID_INPUT`, rather than left to time out.
+fn decode_request(frame: &Frame, limits: &Limits) -> (Request, Method) {
+    let invalid = || Request::Status(Status::InvalidInput.code());
+    match split_method_payload(&frame.payload, limits) {
+        Ok((mut body, meta)) => {
+            let request = Request::decode(&meta.method, &mut body).unwrap_or_else(|e| {
+                warn!(error = %e, topic = %frame.header.topic, "malformed request body");
+                invalid()
+            });
+            (request, meta.method)
+        }
+        Err(e) => {
+            warn!(error = %e, topic = %frame.header.topic, "undecodable request");
+            (invalid(), Method::Other("?".into()))
+        }
+    }
+}
+
+/// The request's names, and a future that serves it and sends the response.
+fn serve(
+    core: Arc<Core>,
+    frame: Frame,
+    request: Request,
+    method: Method,
+) -> (Vec<String>, impl Future<Output = ()> + Send + 'static) {
+    let names = request.names();
+    let job = async move {
+        let span = debug_span!("rbus.serve", method = method.as_str(), topic = %frame.header.topic);
+        let caller = match &request {
+            Request::Get(r) => Some(r.requesting_component.clone()),
+            Request::Set(r) => Some(r.component.clone()),
+            _ => None,
+        };
+        let cx = Context::new(caller, frame.header.reply_topic.clone(), span.clone());
+        if matches!(request, Request::Subscribe(_, true)) {
+            ensure_poller(&core);
+        }
+        let payload = core
+            .registry
+            .handle(request, cx, &*core)
+            .instrument(span)
+            .await;
+        let header = Header::new(
+            frame.header.seq,
+            Flags::RESPONSE | Flags::RAW_BINARY,
+            frame.header.reply_topic,
+            frame.header.topic,
+        );
+        // A failure means the connection is closing; the caller will time out.
+        let _ = core.queue(&Frame::new(header, payload));
+    };
+    (names, job)
 }
 
 #[cfg(test)]

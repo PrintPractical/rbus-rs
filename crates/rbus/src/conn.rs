@@ -7,8 +7,9 @@
 //! - **Reads** happen in a reader task per socket. It matches each response to its
 //!   pending request by sequence number (wire-protocol.md section 3), routes
 //!   each event to its subscription by the echoed component id, fans out
-//!   broker advisories, and hands each request for our providers to a task
-//!   of its own (`provider::serve`).
+//!   broker advisories, and hands each request for our providers to
+//!   `provider::dispatch`: a task of its own, or the serial worker for
+//!   serialized providers.
 //! - **Cancellation**: a pending request is removed from the table when its
 //!   [`Pending`] is dropped, so a cancelled or timed-out call leaves nothing
 //!   behind and a late response is discarded.
@@ -496,7 +497,7 @@ impl Core {
         } else if flags.contains(Flags::RAW_BINARY) && !flags.contains(Flags::REQUEST) {
             self.on_event(&frame).await;
         } else if flags.contains(Flags::RAW_BINARY) {
-            tokio::spawn(crate::provider::serve(self.clone(), frame));
+            crate::provider::dispatch(self, frame);
         } else {
             trace!(topic = %frame.header.topic, ?flags, "unhandled inbound message");
         }
@@ -668,7 +669,7 @@ impl Conn {
             advisory_listeners: Mutex::new(Vec::new()),
             advisories: Mutex::new(false),
             resubscribe: resubscribe.clone(),
-            registry: crate::provider::Registry::default(),
+            registry: crate::provider::Registry::new(&limits),
             component_route: NEXT_COMPONENT_ROUTE.fetch_add(1, Ordering::Relaxed),
             component: component.to_owned(),
             aliases: Mutex::new(BTreeMap::new()),

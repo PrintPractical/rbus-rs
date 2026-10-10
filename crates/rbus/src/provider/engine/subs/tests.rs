@@ -627,8 +627,11 @@ async fn d11_a_store_sees_every_change_and_restores_live_subscribers() {
         .mount_with(m.schema(), m.clone(), false, Arc::new(store.clone()))
         .unwrap();
     let out = Rec::default();
-    r.restore(id, &out);
-    r.restore(id, &out);
+    // Listeners from attach() hear about restored subscribers.
+    let mut events = r.listen(id);
+    assert!(r.restore(id, &out), "restored, so the poller is started");
+    assert!(!r.restore(id, &out));
+    assert!(matches!(events.next().await, Some(Ok(SubscriptionEvent::Added(i))) if i == keep));
     assert_eq!(
         r.subscribers(id, None),
         std::slice::from_ref(&keep),
@@ -645,7 +648,18 @@ async fn d11_a_store_sees_every_change_and_restores_live_subscribers() {
         "ids continue after restored ones"
     );
     assert_eq!(store.0.lock().unwrap().last().unwrap().len(), 2);
-    r.restore(9, &out);
+    assert!(!r.restore(9, &out));
+
+    // A consumer that subscribed again before the restore isn't doubled,
+    // though its new subscription has another id.
+    let r = Registry::default();
+    let id = r
+        .mount_with(m.schema(), m.clone(), false, Arc::new(store.clone()))
+        .unwrap();
+    let again = sub(&r, &out, req("Device.S.Ping!", &me, 2, None, false)).await;
+    assert_eq!(again.status, 0);
+    assert!(!r.restore(id, &out));
+    assert_eq!(r.subscribers(id, None).len(), 1);
 }
 
 #[tokio::test]
@@ -671,4 +685,89 @@ fn request_body(rq: &SubscribeRequest) -> Vec<u8> {
     let mut w = Writer::new();
     rq.encode(&mut w);
     w.into_bytes()
+}
+
+/// A store that reads the registry back while saving, as a store that
+/// logs its provider's subscribers might.
+struct ReadBack {
+    registry: std::sync::OnceLock<Arc<Registry>>,
+    saved: StdMutex<Vec<Vec<String>>>,
+}
+
+impl SubscriberStore for ReadBack {
+    fn save(&self, subscribers: &[SubscriberInfo]) {
+        // Re-entering the registry from a save deadlocked while saves ran
+        // under its lock.
+        let now = self.registry.get().unwrap().subscribers(0, None);
+        assert_eq!(now.len(), subscribers.len());
+        self.saved
+            .lock()
+            .unwrap()
+            .push(subscribers.iter().map(|s| s.event.clone()).collect());
+    }
+}
+
+#[tokio::test]
+async fn pt2_removing_a_row_drops_the_exact_subscriptions_under_it() {
+    let r = Arc::new(Registry::default());
+    let m = Arc::new(Model {
+        reads: AtomicI32::new(0),
+        value: StdMutex::new(Value::I32(0)),
+        fail_reads: AtomicBool::new(false),
+    });
+    let store = Arc::new(ReadBack {
+        registry: std::sync::OnceLock::new(),
+        saved: StdMutex::new(Vec::new()),
+    });
+    let _ = store.registry.set(r.clone());
+    struct Shared(Arc<ReadBack>);
+    impl SubscriberStore for Shared {
+        fn save(&self, subscribers: &[SubscriberInfo]) {
+            self.0.save(subscribers);
+        }
+    }
+    r.mount_with(
+        m.schema(),
+        m.clone(),
+        false,
+        Arc::new(Shared(store.clone())),
+    )
+    .unwrap();
+    let out = Rec::default();
+    for (inst, alias) in [(1, "one"), (2, "two")] {
+        let row = RowId {
+            inst,
+            alias: Some(alias.into()),
+        };
+        r.add_local_row(0, "Device.S.T.", row, &out).unwrap();
+    }
+    // By alias, by number, under the other row, and by pattern.
+    for (i, name) in [
+        "Device.S.T.[one].X",
+        "Device.S.T.1.X",
+        "Device.S.T.2.X",
+        "Device.S.T.*.X",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = sub(&r, &out, req(name, "rbus.c.INBOX.7", i as i32, None, false)).await;
+        assert_eq!(resp.status, 0, "{name}");
+    }
+    r.remove_local_row(0, "Device.S.T.", 1, &out).unwrap();
+    let left: Vec<String> = r
+        .subscribers(0, None)
+        .into_iter()
+        .map(|s| s.event)
+        .collect();
+    assert_eq!(left, ["Device.S.T.2.X", "Device.S.T.*.X"]);
+    // The store saw it, after the lock was released.
+    assert_eq!(
+        store.saved.lock().unwrap().last().unwrap(),
+        &["Device.S.T.2.X", "Device.S.T.*.X"]
+    );
+    // A row number used again doesn't bring the old subscription back.
+    let back = RowId::from(1);
+    r.add_local_row(0, "Device.S.T.", back, &out).unwrap();
+    assert_eq!(r.subscribers(0, None).len(), 2);
 }

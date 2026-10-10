@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rbus_wire::value::{Object, Value};
@@ -12,7 +12,9 @@ use serde::de::DeserializeOwned;
 
 use crate::name::{MethodName, PropertyName, TablePath};
 use crate::provider::derive::{BoxFuture, value_as};
-use crate::provider::{Access, Context, Fault, Provider, Rows, Schema, SetFault, Transaction};
+use crate::provider::{
+    Access, Context, Fault, Handle, Provider, Rows, Schema, SetFault, Transaction,
+};
 use crate::subscribe::RowId;
 use crate::types::{IntoValue, RbusType};
 
@@ -58,13 +60,17 @@ enum Entry {
 /// Names are templates, as in [`Schema`]: `Device.Sample.Host.{i}.Name`
 /// is served for every row of `Device.Sample.Host.`, and
 /// [`Context::instances`] says which. Rows of a [`Rows::Dynamic`] table are
-/// numbered from 1 when consumers add them; the provider adds its own with
-/// [`Provided::add_row`](crate::provider::Provided::add_row).
+/// numbered when consumers add them, above any row the provider added
+/// itself with [`Provided::add_row`](crate::provider::Provided::add_row);
+/// numbers are never reused.
 #[derive(Default)]
 pub struct DataModel {
     schema: Schema,
     entries: Vec<(String, Entry)>,
     next_inst: Mutex<HashMap<String, u32>>,
+    /// For the rows the provider added itself, which consumers' new rows
+    /// must not collide with.
+    handle: OnceLock<Handle>,
 }
 
 impl DataModel {
@@ -73,8 +79,10 @@ impl DataModel {
         Self::default()
     }
 
-    fn with(mut self, name: &str, schema: Schema, entry: Entry) -> Self {
-        self.schema = schema;
+    /// Adds an element: `add` extends the schema, which is moved rather
+    /// than copied, so building stays linear.
+    fn with(mut self, name: &str, add: impl FnOnce(Schema) -> Schema, entry: Entry) -> Self {
+        self.schema = add(std::mem::take(&mut self.schema));
         self.entries.push((name.to_owned(), entry));
         self
     }
@@ -86,12 +94,12 @@ impl DataModel {
         F: Fn(Context) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<T, Fault>> + Send + 'static,
     {
-        let schema = self.schema.clone().property(name, Access::ReadOnly);
+        let add = |s: Schema| s.property(name, Access::ReadOnly);
         let entry = Entry::Property {
             get: Some(getter(get)),
             set: None,
         };
-        self.with(name, schema, entry)
+        self.with(name, add, entry)
     }
 
     /// A property consumers can read and write. A set whose value doesn't
@@ -105,7 +113,7 @@ impl DataModel {
         S: Fn(Context, T) -> SFut + Send + Sync + 'static,
         SFut: Future<Output = Result<(), Fault>> + Send + 'static,
     {
-        let schema = self.schema.clone().property(name, Access::ReadWrite);
+        let add = |s: Schema| s.property(name, Access::ReadWrite);
         let set: Setter = Arc::new(move |cx, value: &Value| {
             let value: T = value_as(value)?;
             Ok(Box::pin(set(cx, value)) as BoxFuture<'static, _>)
@@ -114,7 +122,7 @@ impl DataModel {
             get: Some(getter(get)),
             set: Some(set),
         };
-        self.with(name, schema, entry)
+        self.with(name, add, entry)
     }
 
     /// A method. Its arguments deserialize into `A` and its result
@@ -126,7 +134,7 @@ impl DataModel {
         F: Fn(Context, A) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<R, Fault>> + Send + 'static,
     {
-        let schema = self.schema.clone().method(name);
+        let add = |s: Schema| s.method(name);
         let f = Arc::new(f);
         let method: Method = Arc::new(move |cx, args| {
             let f = f.clone();
@@ -137,19 +145,19 @@ impl DataModel {
                 crate::to_object(&reply).map_err(Fault::internal)
             })
         });
-        self.with(name, schema, Entry::Method(method))
+        self.with(name, add, Entry::Method(method))
     }
 
     /// An event; publish it with [`Provided::publish`](crate::provider::Provided::publish).
     pub fn event(self, name: &str) -> Self {
-        let schema = self.schema.clone().event(name);
-        self.with(name, schema, Entry::Other)
+        let add = |s: Schema| s.event(name);
+        self.with(name, add, Entry::Other)
     }
 
     /// A table.
     pub fn table(self, path: &str, rows: Rows) -> Self {
-        let schema = self.schema.clone().table(path, rows);
-        self.with(path, schema, Entry::Other)
+        let add = |s: Schema| s.table(path, rows);
+        self.with(path, add, Entry::Other)
     }
 
     /// Polls the property added last for changes; see [`Schema::poll`].
@@ -191,6 +199,10 @@ fn matches_template(template: &str, name: &str) -> bool {
 impl Provider for DataModel {
     fn schema(&self) -> Schema {
         self.schema.clone()
+    }
+
+    fn attach(&self, handle: Handle) {
+        let _ = self.handle.set(handle);
     }
 
     async fn get(&self, cx: &Context, name: &PropertyName) -> Result<Value, Fault> {
@@ -235,10 +247,22 @@ impl Provider for DataModel {
         table: &TablePath,
         _alias: Option<&str>,
     ) -> Result<u32, Fault> {
+        // Above every row there is, and never reused, as in C.
+        let highest = self
+            .handle
+            .get()
+            .and_then(|h| h.rows(table.as_str()).ok())
+            .into_iter()
+            .flatten()
+            .map(|r| r.inst)
+            .max()
+            .unwrap_or(0);
         let mut next = self.next_inst.lock().unwrap_or_else(|e| e.into_inner());
         let n = next.entry(table.to_string()).or_insert(1);
-        *n += 1;
-        Ok(*n - 1)
+        *n = (*n).max(highest.saturating_add(1));
+        let inst = *n;
+        *n = n.saturating_add(1);
+        Ok(inst)
     }
 
     async fn remove_row(
