@@ -286,3 +286,151 @@ async fn bad_schemas_fail_before_any_io() {
     let err = bus.provide(Model).await.unwrap_err();
     assert!(matches!(err, Error::Disconnected), "{err:?}");
 }
+
+/// A model written with the derives (M6), registered over the scripted
+/// socket.
+#[cfg(feature = "macros")]
+mod derived {
+    use rbus_wire::body::{AddRowRequest, AddRowResponse, DeleteRowRequest};
+    use rbus_wire::value::Object;
+
+    use super::*;
+    use crate::provider::{Event, Prop, Table};
+
+    #[derive(crate::Model, Default)]
+    #[rbus(path = "Device.H.")]
+    struct Hosts {
+        #[rbus(writable)]
+        count: Prop<u32>,
+        #[rbus(name = "Host", add_row, remove_row)]
+        hosts: Table<Host>,
+        alarm: Event<Object>,
+    }
+
+    #[derive(crate::Row, Clone, PartialEq, Default, Debug)]
+    struct Host {
+        name: String,
+        #[rbus(add_row)]
+        ip: Table<Ip>,
+    }
+
+    #[derive(crate::Row, Clone, PartialEq, Default, Debug)]
+    struct Ip {
+        address: String,
+    }
+
+    const NAMES: [&str; 6] = [
+        "Device.H.Count",
+        "Device.H.Host.{i}.",
+        "Device.H.Host.{i}.Name",
+        "Device.H.Host.{i}.Ip.{i}.",
+        "Device.H.Host.{i}.Ip.{i}.Address",
+        "Device.H.Alarm!",
+    ];
+
+    #[tokio::test]
+    async fn pt3_a_model_records_its_rows_and_consumers_rows() {
+        let l = Listener::new();
+        let (bus, mut peer) = l.connect(short()).await;
+        let route = bus.inner.conn.component_route;
+        // Rows that exist before registration are recorded with it.
+        let model = Hosts::default();
+        let host = Host {
+            name: "router".into(),
+            ..Host::default()
+        };
+        host.ip
+            .insert(Ip {
+                address: "10.0.0.1".into(),
+            })
+            .unwrap();
+        model.hosts.insert(host).unwrap();
+        let provide = tokio::spawn({
+            let bus = bus.clone();
+            async move { bus.provide(model).await }
+        });
+        let mut regs = Vec::new();
+        for name in NAMES {
+            regs.push(expect_alias(&mut peer, 1, name, route).await);
+        }
+        for f in &regs {
+            peer.reply_json(f, &ResultReply { result: 0 }).await;
+        }
+        let hosts = provide.await.unwrap().unwrap();
+        let handle = hosts.handle();
+        assert!(format!("{handle:?}").contains("connected: true"));
+        assert_eq!(hosts.rows("Device.H.Host.").unwrap().len(), 1);
+        assert_eq!(hosts.rows("Device.H.Host.1.Ip.").unwrap().len(), 1);
+
+        // A consumer's row is recorded by the table itself; the reply
+        // carries its number, and the engine doesn't add it twice.
+        let req = AddRowRequest {
+            session_id: 0,
+            table: "Device.H.Host.".into(),
+            alias: Some("lan".into()),
+        };
+        peer.send(inbound(5, "Device.H.Host.", Method::AddTableRow, &req))
+            .await;
+        let resp: AddRowResponse = decode(&peer.recv().await);
+        assert_eq!((resp.status, resp.instance), (0, Some(2)));
+        assert_eq!(hosts.hosts.find("lan"), Some(2));
+        assert_eq!(hosts.rows("Device.H.Host.").unwrap().len(), 2);
+        let req = AddRowRequest {
+            session_id: 0,
+            table: "Device.H.Host.2.Ip.".into(),
+            alias: None,
+        };
+        peer.send(inbound(6, "Device.H.Host.2.Ip.", Method::AddTableRow, &req))
+            .await;
+        let resp: AddRowResponse = decode(&peer.recv().await);
+        assert_eq!((resp.status, resp.instance), (0, Some(1)));
+        // Without subscribers, changes send nothing.
+        hosts.count.set(3);
+        hosts
+            .hosts
+            .update(1, |h| h.name = "gateway".into())
+            .unwrap();
+        hosts.alarm.publish(Object::new()).unwrap();
+        let req = DeleteRowRequest {
+            session_id: 0,
+            row: "Device.H.Host.2.".into(),
+        };
+        peer.send(inbound(7, "Device.H.Host.2.", Method::DeleteTableRow, &req))
+            .await;
+        let resp: StatusResponse = decode(&peer.recv().await);
+        assert_eq!(resp.status, 0);
+        assert_eq!(hosts.hosts.len(), 1);
+        assert!(hosts.rows("Device.H.Host.2.Ip.").is_err());
+
+        // Once the connection is gone, the handle says so.
+        drop(peer);
+        bus.close().await.unwrap();
+        assert!(matches!(
+            handle.add_row("Device.H.Host.", 9),
+            Err(Error::Disconnected)
+        ));
+        assert!(matches!(
+            hosts.hosts.insert(Host::default()),
+            Err(Error::Disconnected)
+        ));
+        assert!(matches!(
+            hosts.alarm.publish(Object::new()),
+            Err(Error::Disconnected)
+        ));
+        hosts.count.set(4);
+        // The row goes even though the engine can't be told.
+        assert_eq!(hosts.hosts.remove(1).unwrap().name, "gateway");
+        assert!(handle.subscribers(None).is_empty());
+        assert!(handle.subscription_events().next().await.is_none());
+        assert!(handle.notify_changed("Device.H.Count").await.is_err());
+        assert!(
+            handle
+                .publish_value_change("Device.H.Count", 1u32, 2u32)
+                .is_err()
+        );
+        assert!(handle.publish("Device.H.Alarm!", &Object::new()).is_err());
+        assert!(handle.remove_row("Device.H.Host.", 1).is_err());
+        assert!(handle.rows("Device.H.Host.").is_err());
+        assert!(format!("{handle:?}").contains("connected: false"));
+    }
+}

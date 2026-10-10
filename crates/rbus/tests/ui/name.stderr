@@ -1,0 +1,17 @@
+error: invalid rbus name "Device..Enable": it contains an empty path segment
+ --> tests/ui/name.rs:2:43
+  |
+2 | const A: rbus::PropertyName = rbus::name!("Device..Enable");
+  |                                           ^^^^^^^^^^^^^^^^
+
+error: invalid rbus name "Device.()": it has no method name before "()"
+ --> tests/ui/name.rs:3:41
+  |
+3 | const B: rbus::MethodName = rbus::name!("Device.()");
+  |                                         ^^^^^^^^^^^
+
+error: invalid rbus name "Device Alarm!": it contains whitespace or a control character
+ --> tests/ui/name.rs:4:40
+  |
+4 | const C: rbus::EventName = rbus::name!("Device Alarm!");
+  |                                        ^^^^^^^^^^^^^^^

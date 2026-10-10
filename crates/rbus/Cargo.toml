@@ -26,6 +26,7 @@ rbus-testkit = { path = "../rbus-testkit" }
 serde = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+trybuild = "1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 
 [features]

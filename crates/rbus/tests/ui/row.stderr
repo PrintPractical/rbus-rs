@@ -1,0 +1,17 @@
+error: row fields are plain values; the table publishes their changes, so use the value type itself instead of `Prop`
+ --> tests/ui/row.rs:5:13
+  |
+5 |     enable: Prop<bool>,
+  |             ^^^^
+
+error: a row takes no struct options; its table's field in the model or outer row names it
+ --> tests/ui/row.rs:9:1
+  |
+9 | #[rbus(path = "Device.A.")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: `writable` doesn't apply to a sub-object
+  --> tests/ui/row.rs:16:20
+   |
+16 |     #[rbus(object, writable)]
+   |                    ^^^^^^^^
