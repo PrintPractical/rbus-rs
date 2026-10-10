@@ -11,6 +11,12 @@ use crate::message::Body;
 use crate::msgpack::{Reader, Writer};
 use crate::value::{Object, Property, decode_properties, encode_properties};
 
+/// True for a success status, including the legacy CCSP success code (100),
+/// after which C peers send the same body as after 0.
+fn succeeded(status: i32) -> bool {
+    crate::status::Status::from_wire(status).is_success()
+}
+
 /// A response that carries only a status: delete row, commit, and any error
 /// reply to an operation whose success body has more fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +81,7 @@ impl Body for GetResponse {
     }
     fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let status = r.i32()?;
-        let properties = if status == 0 && !r.is_empty() {
+        let properties = if succeeded(status) && !r.is_empty() {
             decode_properties(r)?
         } else {
             Vec::new()
@@ -151,7 +157,7 @@ impl Body for SetResponse {
             failed_element: None,
         };
         if !r.is_empty() {
-            if status == 0 {
+            if succeeded(status) {
                 out.old_values = decode_properties(r)?;
             } else {
                 out.failed_element = Some(r.str()?);
@@ -240,7 +246,7 @@ impl Body for ElementNamesResponse {
     fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let status = r.i32()?;
         let mut elements = Vec::new();
-        if status == 0 && !r.is_empty() {
+        if succeeded(status) && !r.is_empty() {
             for _ in 0..r.i32()? {
                 elements.push(ElementName {
                     name: r.str()?,
@@ -285,7 +291,7 @@ impl Body for RowNamesResponse {
     fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let status = r.i32()?;
         let mut rows = Vec::new();
-        if status == 0 && !r.is_empty() {
+        if succeeded(status) && !r.is_empty() {
             for _ in 0..r.i32()? {
                 let instance = r.i32()? as u32;
                 let alias = Some(r.str()?).filter(|a| !a.is_empty());
@@ -877,5 +883,22 @@ mod tests {
         .encode(&mut w);
         let b = w.into_bytes();
         assert_eq!(decode_event(&mut Reader::new(&b)).unwrap().name, "e");
+    }
+
+    #[test]
+    fn legacy_success_code_carries_a_body() {
+        // CCSP peers answer 100 (CCSP_SUCCESS) and then the same body as 0.
+        let mut w = Writer::new();
+        w.i32(100);
+        encode_properties(&[Property::new("Device.A", Value::I32(1))], &mut w);
+        let b = w.into_bytes();
+        let got = GetResponse::decode(&mut Reader::new(&b)).unwrap();
+        assert_eq!(got.properties.len(), 1);
+        let mut w = Writer::new();
+        w.i32(100);
+        w.i32(7);
+        let b = w.into_bytes();
+        let got = AddRowResponse::decode(&mut Reader::new(&b)).unwrap();
+        assert_eq!(got.instance, Some(7));
     }
 }

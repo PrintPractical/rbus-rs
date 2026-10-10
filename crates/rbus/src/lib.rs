@@ -2,4 +2,53 @@
 //!
 //! `rbus` talks to the `rtrouted` broker over its unix socket using the native
 //! wire protocol: no C library, no FFI, and no `unsafe` in this crate.
+//!
+//! ```no_run
+//! use rbus::Rbus;
+//!
+//! # async fn demo() -> rbus::Result<()> {
+//! let bus = Rbus::connect("com.example.app").await?;
+//!
+//! let uptime: u32 = bus.get("Device.DeviceInfo.UpTime").await?;
+//! bus.set("Device.WiFi.Radio.1.Enable", true).await?;
+//!
+//! #[derive(serde::Serialize)]
+//! struct Args { delay: u32 }
+//! let () = bus.invoke("Device.Reboot()", Args { delay: 5 }).await?;
+//!
+//! bus.close().await?;
+//! # Ok(()) }
+//! ```
+//!
+//! - [`Rbus`] is the connection; it is `Clone` and shared between tasks.
+//! - Names are typed by kind ([`PropertyName`], [`MethodName`], ...); plain
+//!   strings work too and are checked at the call.
+//! - Scalars convert through [`RbusType`]; structured data through serde
+//!   ([`to_object`], [`from_object`]).
+//! - Every failure is an [`Error`].
+//!
+//! Each operation runs inside a `tracing` span (`rbus.get`, `rbus.set`, ...).
 #![forbid(unsafe_code)]
+
+mod bus;
+mod conn;
+mod consumer;
+mod convert;
+mod error;
+pub mod name;
+mod types;
+
+#[cfg(test)]
+mod engine_tests;
+
+pub use bus::{DEFAULT_SOCKET, Rbus, RbusBuilder, Timeouts};
+pub use conn::ConnectionState;
+pub use consumer::{SetMany, Values};
+pub use convert::{from_object, from_value, to_object, to_value};
+pub use error::{Error, Result, Status, TypeError};
+pub use name::{EventName, IntoName, MethodName, Name, NameError, PropertyName, TablePath};
+pub use rbus_wire::value::{DateTime, Object, ObjectKind, Property, Value};
+pub use types::{IntoValue, RbusType};
+
+/// The wire codecs this crate is built on.
+pub use rbus_wire as wire;
