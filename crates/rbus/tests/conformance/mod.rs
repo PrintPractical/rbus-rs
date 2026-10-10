@@ -274,7 +274,18 @@ impl Provider for Conformance {
                 Ok(reply("MethodAsync1()"))
             }
             "MethodAsync2()" => {
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                // `rbusTestConsumer --Methods` makes five of these calls at
+                // once, with `param1` = 0..4, and counts passes with a
+                // non-atomic `gCountPass++` from each reply's callback
+                // thread (`test_macros.h`). Replies that land together can
+                // lose a count. The C provider has the same race. Staggering
+                // the replies by 100 ms keeps the callbacks apart; the five
+                // calls still run at the same time.
+                let stagger = match args.get("param1") {
+                    Some(Value::I32(i)) => Duration::from_millis(100 * u64::from(i.unsigned_abs())),
+                    _ => Duration::ZERO,
+                };
+                tokio::time::sleep(Duration::from_secs(3) + stagger).await;
                 Ok(reply("MethodAsync2()").with("value", async_value()))
             }
             "MethodAsync3()" => {

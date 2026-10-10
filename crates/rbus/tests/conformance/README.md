@@ -31,6 +31,11 @@ None of these is visible to the groups above:
 - **`MethodAsync2()` and `MethodAsync3()`.** The C provider answers these
   from a thread, 3 s later (`rbusMethod_SendAsyncResponse`). Here the async
   handler waits 3 s and then returns, which is P6 done the Rust way.
+- **Five parallel `MethodAsync2()` calls.** `rbusTestConsumer` counts passes
+  with a non-atomic `gCountPass++` from each reply's callback thread, so
+  replies that arrive together can lose a count (seen in CI: 54 of 55). The
+  C provider has the same race. These replies are staggered by 100 ms per
+  call index; the calls still overlap.
 - **`BigString` and `BigBytes`.** The C provider swaps them: its
   `getBigHandler` tests `strstr(..) == 0`. Here each one keeps its own value.
   The `--Value` group sets them before reading them, so the swap never
