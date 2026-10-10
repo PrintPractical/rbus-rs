@@ -10,6 +10,8 @@ rbus-rs speaks the `rtrouted` wire protocol directly. There is no C library to l
 
 > **Status:** experimental, pre-1.0. The API may still change. rbus-rs reimplements the protocol rather than linking the C library, so a change to RDK's rbus or `rtrouted` can break compatibility until rbus-rs catches up; see [Compatibility](#compatibility) for the version it is tested against.
 
+> **Built with AI:** rbus-rs was co-developed with Claude. AI wrote a substantial part of the code, tests and documentation. I'm saying so up front so you can weigh that when you decide whether to use it.
+
 The RBUS protocol and its reference implementation are [RDK's rbus](https://github.com/rdkcentral/rbus) (Apache-2.0). rbus-rs is an independent reimplementation that contains no rbus code. The C sources served as the protocol reference, and the C programs serve as interop test peers.
 
 ## No unsafe, no C
