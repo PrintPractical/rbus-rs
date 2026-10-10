@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/rbus-wire", "crates/rbus", "crates/rbus-macros"]
+members = ["crates/rbus-wire", "crates/rbus", "crates/rbus-macros", "crates/rbus-testkit"]
 
 [workspace.package]
 version = "0.0.0"
