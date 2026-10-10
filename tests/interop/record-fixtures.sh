@@ -113,12 +113,32 @@ discovery() {
     rbuscli discelements rbusSampleProvider
 }
 
+datetime_value() {   # rbuscli as provider, so a real DateTime can be set and read back
+    (printf 'register property Device.Rec.DateTime\n'; sleep 6; printf 'quit\n') \
+        | timeout 20 rbuscli -i >/dev/null 2>&1 &
+    pids+=($!); sleep 2
+    rbuscli setvalues Device.Rec.DateTime datetime 2026-10-10T12:34:56-05:30
+    rbuscli getvalues Device.Rec.DateTime
+}
+
+subscribe_filter_initial() {   # value-change subscription with a filter and initial value
+    bg rbusValueChangeProvider 20; sleep 2
+    interactive "subscribe Device.Provider1.Param1 > 2 true" 7 "unsubscribe Device.Provider1.Param1 > 2" 1
+}
+
+get_names() {
+    bg rbusSampleProvider 15; sleep 2
+    rbuscli getnames Device.SampleProvider.
+    rbuscli getnames Device.SampleProvider. true
+}
+
 get_single_rt() {
     get_single
 }
 
 for s in get_single get_multi get_all_types set_values undeliverable tables \
-         methods events_general events_value_change discovery get_single_rt; do
+         methods events_general events_value_change discovery datetime_value \
+         subscribe_filter_initial get_names get_single_rt; do
     scenario "$s" "$s"
 done
 echo "fixtures written to $out"

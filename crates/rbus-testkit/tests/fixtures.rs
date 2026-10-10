@@ -16,6 +16,9 @@ const SCENARIOS: &[&str] = &[
     "events_general",
     "events_value_change",
     "discovery",
+    "datetime_value",
+    "subscribe_filter_initial",
+    "get_names",
     "get_single_rt",
 ];
 
