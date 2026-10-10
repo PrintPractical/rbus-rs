@@ -12,11 +12,11 @@ use rbus_wire::value::Value;
 use tracing::debug;
 
 use crate::error::{Error, Result, Status};
-use crate::name::Name;
 use crate::provider::Handle;
 use crate::provider::derive::Row;
 use crate::provider::events::SubscriberInfo;
 use crate::provider::fault::Fault;
+use crate::provider::handle::element_error;
 use crate::table::RowId;
 use crate::types::RbusType;
 
@@ -37,15 +37,6 @@ fn read<T>(m: &RwLock<T>) -> RwLockReadGuard<'_, T> {
 
 fn write<T>(m: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     m.write().unwrap_or_else(|e| e.into_inner())
-}
-
-/// An error naming `name`, which may not be a valid element name (an alias,
-/// say).
-fn status_of(name: &str, status: Status) -> Error {
-    match Name::parse(name.to_owned()) {
-        Ok(name) => Error::Status { name, status },
-        Err(e) => Error::Name(e),
-    }
 }
 
 /// A property whose value the model stores (P11). Consumers' gets read it,
@@ -310,13 +301,13 @@ impl<R: Row> TableState<R> {
     fn insert(&mut self, alias: Option<String>, row: R) -> Result<u32> {
         if let Some(a) = &alias {
             if self.rows.iter().any(|(id, _)| id.alias.as_ref() == Some(a)) {
-                return Err(status_of(a, Status::ElementNameDuplicate));
+                return Err(element_error(a, Status::ElementNameDuplicate));
             }
         }
         // A clone of a row in a table shares its tables and events; this row
         // would take them over.
         if row.is_bound() {
-            return Err(status_of(
+            return Err(element_error(
                 &self.row_name(self.next),
                 Status::InvalidOperation,
             ));
@@ -378,7 +369,7 @@ impl<R: Row> Table<R> {
     pub fn update(&self, inst: u32, f: impl FnOnce(&mut R)) -> Result<()> {
         let mut state = self.write();
         let Some(i) = state.position(inst) else {
-            return Err(status_of(
+            return Err(element_error(
                 &state.row_name(inst),
                 Status::ElementDoesNotExist,
             ));
@@ -406,7 +397,7 @@ impl<R: Row> Table<R> {
     pub fn remove(&self, inst: u32) -> Result<R> {
         let mut state = self.write();
         if state.position(inst).is_none() {
-            return Err(status_of(
+            return Err(element_error(
                 &state.row_name(inst),
                 Status::ElementDoesNotExist,
             ));

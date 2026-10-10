@@ -131,8 +131,20 @@ impl State {
         Ok((kind, node.owner))
     }
 
-    fn mount(&self, id: MountId) -> Option<&Mount> {
+    /// The handler of the provider that owns a found property.
+    fn handler_of(&self, found: &Found) -> Option<Handler> {
+        self.handler(self.model.tree.node(found.node).owner)
+    }
+
+    pub(super) fn mount(&self, id: MountId) -> Option<&Mount> {
         self.mounts.iter().find(|(m, _)| *m == id).map(|(_, m)| m)
+    }
+
+    fn mount_mut(&mut self, id: MountId) -> Option<&mut Mount> {
+        self.mounts
+            .iter_mut()
+            .find(|(m, _)| *m == id)
+            .map(|(_, m)| m)
     }
 
     /// Tells the mount's listeners about a change, and marks its store for
@@ -140,12 +152,7 @@ impl State {
     /// store is the user's code, which may block or call back in.
     fn changed(&mut self, mount: Option<MountId>, event: SubscriptionEvent) {
         let Some(id) = mount else { return };
-        if let Some(m) = self
-            .mounts
-            .iter_mut()
-            .find(|(m, _)| *m == id)
-            .map(|(_, m)| m)
-        {
+        if let Some(m) = self.mount_mut(id) {
             m.listeners.retain(|w| w.strong_count() > 0);
             for q in m.listeners.iter().filter_map(Weak::upgrade) {
                 q.push_now(event.clone());
@@ -411,16 +418,12 @@ impl Registry {
                     .into_iter()
                     .filter(|f| !state.values.contains_key(&f.name))
                     .filter_map(|f| {
-                        let h = state.handler(state.model.tree.node(f.node).owner)?;
+                        let h = state.handler_of(&f)?;
                         Some((f, h))
                     })
                     .collect()
             };
-            for (found, handler) in missing {
-                if let Some(v) = self.read(&handler, &found, internal_cx(out)).await {
-                    self.state().values.entry(found.name).or_insert(v);
-                }
-            }
+            self.record_baselines(out, missing).await;
         }
         let info = {
             let mut state = self.state();
@@ -483,7 +486,7 @@ impl Registry {
                 found
                     .into_iter()
                     .map(|f| {
-                        let h = state.handler(state.model.tree.node(f.node).owner);
+                        let h = state.handler_of(&f);
                         (f, h)
                     })
                     .collect()
@@ -521,7 +524,7 @@ impl Registry {
             let read = {
                 let state = self.state();
                 state.covered(name).into_iter().next().and_then(|f| {
-                    let h = state.handler(state.model.tree.node(f.node).owner)?;
+                    let h = state.handler_of(&f)?;
                     Some((f, h))
                 })
             };
@@ -631,8 +634,8 @@ impl Registry {
     /// A stream of a provider's subscription changes (P8).
     pub(crate) fn listen(&self, id: MountId) -> SubscriptionEvents {
         let queue = Arc::new(Queue::new(SUBSCRIPTION_EVENT_BUFFER, Overflow::DropOldest));
-        match self.state().mounts.iter_mut().find(|(m, _)| *m == id) {
-            Some((_, m)) => m.listeners.push(Arc::downgrade(&queue)),
+        match self.state().mount_mut(id) {
+            Some(m) => m.listeners.push(Arc::downgrade(&queue)),
             None => queue.close(),
         }
         SubscriptionEvents { queue }
@@ -741,7 +744,7 @@ impl Registry {
     /// Before a set: records the current value of each watched parameter
     /// that has no record yet, so the change can be reported.
     pub(super) async fn before_set(&self, out: &dyn Outbox, handler: &Handler, changes: &[Change]) {
-        let missing: Vec<Found> = {
+        let missing: Vec<(Found, Handler)> = {
             let state = self.state();
             changes
                 .iter()
@@ -754,16 +757,25 @@ impl Registry {
                         return None;
                     };
                     matches!(state.model.tree.node(n).kind, NodeKind::Property(a) if a.readable())
-                        .then(|| Found {
-                            name: r.canonical,
-                            node: n,
-                            instances: r.instances,
+                        .then(|| {
+                            let found = Found {
+                                name: r.canonical,
+                                node: n,
+                                instances: r.instances,
+                            };
+                            (found, handler.clone())
                         })
                 })
                 .collect()
         };
-        for found in missing {
-            if let Some(v) = self.read(handler, &found, internal_cx(out)).await {
+        self.record_baselines(out, missing).await;
+    }
+
+    /// Reads each property, outside the lock, and records its value as the
+    /// one subscribers last saw, unless something recorded one meanwhile.
+    async fn record_baselines(&self, out: &dyn Outbox, reads: Vec<(Found, Handler)>) {
+        for (found, handler) in reads {
+            if let Some(v) = self.read(&handler, &found, internal_cx(out)).await {
                 self.state().values.entry(found.name).or_insert(v);
             }
         }
@@ -820,7 +832,7 @@ impl Registry {
                     .or_insert(now + every);
                 if now >= *next {
                     *next = now + every;
-                    if let Some(h) = state.handler(state.model.tree.node(found.node).owner) {
+                    if let Some(h) = state.handler_of(&found) {
                         due.push((found, h));
                     }
                 }
