@@ -1,0 +1,3 @@
+[submodule "third_party/rbus"]
+	path = third_party/rbus
+	url = https://github.com/rdkcentral/rbus
