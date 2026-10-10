@@ -65,7 +65,7 @@ jobs:
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Interop tests with coverage (gate: 90% lines of rbus-wire and rbus)
+      - name: "Interop tests with coverage (gate: 90% lines of rbus-wire and rbus)"
         run: scripts/interop.sh coverage
         env:
           INTEROP_SKIP_BUILD: "1"
