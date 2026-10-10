@@ -23,7 +23,7 @@
 //!   socket are dropped, never sent on the new one; frames queued while
 //!   reconnecting are dropped too, unless the new socket is already up.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,7 @@ use tracing::{debug, trace, warn};
 
 use crate::bus::Timeouts;
 use crate::discover::Advisory;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, Status};
 use crate::queue::Queue;
 use crate::retry::Retry;
 
@@ -118,8 +118,9 @@ pub(crate) struct Core {
     pub(crate) component_route: u32,
     /// The component name.
     pub(crate) component: String,
-    /// Every element alias registered with the broker, for reconnects.
-    aliases: Mutex<BTreeSet<String>>,
+    /// Every element name this component claims, for releasing and for
+    /// reconnects.
+    aliases: Mutex<BTreeMap<String, Alias>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -164,12 +165,23 @@ impl Core {
 
     /// The socket was lost and a new one is on its way: fail every pending
     /// request, and make sure nothing queued so far reaches the new socket.
-    fn lose(&self) {
-        // In this order, a request either sees the new state or generation,
-        // or has its pending entry cleared below.
-        self.state.send_replace(ConnectionState::Reconnecting);
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        self.pending().clear();
+    /// False, and nothing changes, if the connection was closed meanwhile:
+    /// `Closed` is final.
+    fn lose(&self) -> bool {
+        let lost = self.state.send_if_modified(|s| {
+            let connected = *s == ConnectionState::Connected;
+            if connected {
+                *s = ConnectionState::Reconnecting;
+            }
+            connected
+        });
+        if lost {
+            // In this order, a request either sees the new state or
+            // generation, or has its pending entry cleared below.
+            self.generation.fetch_add(1, Ordering::AcqRel);
+            self.pending().clear();
+        }
+        lost
     }
 
     /// The frames that register this connection, written first on every
@@ -313,8 +325,15 @@ impl Core {
         lock(&self.subs).insert(id, entry);
     }
 
+    /// Forgets a subscription and ends its stream. Closing the queue also
+    /// wakes the reader if it is waiting for room in a full `Block` queue,
+    /// which would otherwise hold the whole connection.
     pub(crate) fn remove_sub(&self, id: i32) -> Option<SubEntry> {
-        lock(&self.subs).remove(&id)
+        let entry = lock(&self.subs).remove(&id);
+        if let Some(e) = &entry {
+            e.queue.close();
+        }
+        entry
     }
 
     pub(crate) fn mark_ready(&self, id: i32) {
@@ -332,30 +351,43 @@ impl Core {
             .collect()
     }
 
-    /// Claims element names for this component, so a reconnect registers
-    /// them again, and queues their registration requests. One lock covers
-    /// both, so a reconnect's replay and a removal can't interleave.
-    pub(crate) fn add_aliases(
+    /// Claims element names for this component and registers them with the
+    /// broker, all requests in flight at once (`rbus_addElement`). Returns
+    /// each name's result.
+    ///
+    /// The work runs as a task of its own, so every reply is handled even if
+    /// the caller stops waiting: a name released while its request was in
+    /// flight is removed again if it did register (see
+    /// [`Core::release_aliases`]).
+    pub(crate) fn claim_aliases(
         self: &Arc<Self>,
-        names: &[String],
-    ) -> Vec<(String, Result<Pending>)> {
-        let mut aliases = lock(&self.aliases);
-        names
-            .iter()
-            .map(|name| {
-                aliases.insert(name.clone());
-                (name.clone(), self.alias_request(name))
-            })
-            .collect()
+        names: Vec<String>,
+    ) -> JoinHandle<Vec<(String, Result<()>)>> {
+        // One lock covers the claim and the queueing, so a replay or a
+        // release can't interleave with it.
+        let requests = {
+            let mut aliases = lock(&self.aliases);
+            names
+                .into_iter()
+                .map(|name| {
+                    aliases.insert(name.clone(), Alias::Pending);
+                    let request = self.alias_request(&name);
+                    (name, request)
+                })
+                .collect()
+        };
+        tokio::spawn(self.clone().settle_aliases(requests))
     }
 
-    /// Forgets element names. `registered` ones are also removed from the
-    /// broker (fire and forget, as `rbus_unregDataElements` does).
-    pub(crate) fn remove_aliases(&self, names: &[String], registered: bool) {
+    /// Gives names up. Registered ones are removed from the broker (fire and
+    /// forget, as `rbus_unregDataElements` does); a pending one is removed
+    /// when its reply comes, and only if it registered. A name the broker
+    /// refused belongs to someone else and is never removed: rtrouted
+    /// removes an alias by name, whoever owns it (`rtrouted.c:842-847`).
+    pub(crate) fn release_aliases(&self, names: &[String]) {
         let mut aliases = lock(&self.aliases);
         for name in names {
-            aliases.remove(name);
-            if registered && !self.is_closed() {
+            if aliases.remove(name) == Some(Alias::Registered) && !self.is_closed() {
                 let _ = self.send_control(&Route::remove(&**name, self.component_route));
             }
         }
@@ -368,29 +400,65 @@ impl Core {
         )
     }
 
+    /// Waits for each registration reply and records what it says.
+    async fn settle_aliases(
+        self: Arc<Self>,
+        requests: Vec<(String, Result<Pending>)>,
+    ) -> Vec<(String, Result<()>)> {
+        let mut results = Vec::with_capacity(requests.len());
+        for (name, request) in requests {
+            let result = match request {
+                Ok(p) => p
+                    .wait(self.timeouts.broker, "register")
+                    .await
+                    .and_then(|frame| alias_result(&name, &frame)),
+                Err(e) => Err(e),
+            };
+            self.settle_alias(&name, &result);
+            results.push((name, result));
+        }
+        results
+    }
+
+    fn settle_alias(&self, name: &str, result: &Result<()>) {
+        let mut aliases = lock(&self.aliases);
+        match (aliases.contains_key(name), result) {
+            // The socket went away; the reconnect registers the name again.
+            (_, Err(Error::Disconnected)) => {}
+            (true, Ok(())) => {
+                aliases.insert(name.to_owned(), Alias::Registered);
+            }
+            // Released while in flight, and ours: remove it again.
+            (false, Ok(())) => {
+                let _ = self.send_control(&Route::remove(name, self.component_route));
+            }
+            // Refused, or no answer: not ours to remove.
+            (true, Err(e)) => {
+                debug!(name, error = %e, "element not registered");
+                aliases.remove(name);
+            }
+            (false, Err(_)) => {}
+        }
+    }
+
     /// Registers every element alias again after a reconnect, then re-sends
-    /// every subscription.
+    /// every subscription. A name another component took meanwhile is
+    /// given up.
     async fn replay(self: Arc<Self>) {
         let requests: Vec<_> = {
-            let aliases = lock(&self.aliases);
+            let mut aliases = lock(&self.aliases);
             aliases
-                .iter()
-                .map(|name| (name.clone(), self.alias_request(name)))
+                .iter_mut()
+                .map(|(name, state)| {
+                    *state = Alias::Pending;
+                    (name.clone(), self.alias_request(name))
+                })
                 .collect()
         };
         let count = requests.len();
-        for (name, request) in requests {
-            let reply = match request {
-                Ok(p) => p.wait(self.timeouts.broker, "register").await,
-                Err(e) => Err(e),
-            };
-            match reply.and_then(|f| Ok(control::decode::<control::ResultReply>(&f.payload)?)) {
-                Ok(r) if r.result == 0 => {}
-                Ok(r) => warn!(
-                    name,
-                    code = r.result,
-                    "element not registered again after reconnect"
-                ),
+        for (name, result) in self.clone().settle_aliases(requests).await {
+            match result {
+                Ok(()) => {}
                 Err(Error::Disconnected) => return,
                 Err(e) => warn!(name, error = %e, "element not registered again after reconnect"),
             }
@@ -406,7 +474,7 @@ impl Core {
 
     #[cfg(test)]
     pub(crate) fn aliases(&self) -> Vec<String> {
-        lock(&self.aliases).iter().cloned().collect()
+        lock(&self.aliases).keys().cloned().collect()
     }
 
     #[cfg(test)]
@@ -477,6 +545,33 @@ impl Core {
             None => trace!(name = %meta.event_name, "event for no subscription"),
         }
     }
+}
+
+/// Where a claimed element name stands with the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alias {
+    /// Its registration request is in flight.
+    Pending,
+    /// The broker routes it to us.
+    Registered,
+}
+
+/// The broker's answer to an alias that is already registered
+/// (`RT_ERROR_DUPLICATE_ENTRY`).
+const ALIAS_DUPLICATE: i32 = 1001;
+/// The broker's answer to an alias that clashes with a table or property
+/// (`RT_ERROR_PROTOCOL_ERROR`), which rbus maps to `INVALID_NAMESPACE`.
+const ALIAS_CONFLICT: i32 = 1003;
+
+/// Interprets the broker's reply to an alias registration.
+fn alias_result(name: &str, frame: &Frame) -> Result<()> {
+    let status = match control::decode::<control::ResultReply>(&frame.payload)?.result {
+        0 => return Ok(()),
+        ALIAS_DUPLICATE => Status::ElementNameDuplicate,
+        ALIAS_CONFLICT => Status::InvalidNamespace,
+        _ => Status::BusError,
+    };
+    Err(crate::provider::element_error(name, status))
 }
 
 /// How a connection behaves; set through the builder.
@@ -576,7 +671,7 @@ impl Conn {
             registry: crate::provider::Registry::default(),
             component_route: NEXT_COMPONENT_ROUTE.fetch_add(1, Ordering::Relaxed),
             component: component.to_owned(),
-            aliases: Mutex::new(BTreeSet::new()),
+            aliases: Mutex::new(BTreeMap::new()),
         });
         let link = Link {
             socket: socket.to_owned(),
@@ -691,8 +786,6 @@ impl Drop for AbortOnDrop {
 enum Stop {
     /// `close()` or `Drop` asked for it.
     Shutdown,
-    /// Every handle on the core is gone.
-    Dropped,
     /// The broker closed the socket, or it failed.
     Lost,
 }
@@ -752,10 +845,6 @@ async fn connection(
                 }
                 return;
             }
-            Stop::Dropped => {
-                let _ = write.shutdown().await;
-                return;
-            }
             Stop::Lost => {}
         }
         drop((reader, write));
@@ -764,13 +853,12 @@ async fn connection(
             c.close();
             return;
         };
-        if c.is_closed() {
+        if !c.lose() {
             return;
         }
         warn!("lost the connection to rtrouted; reconnecting");
-        c.lose();
         drop(c);
-        match reconnect(&core, &mut rx, &link, retry).await {
+        match reconnect(&mut rx, &link, retry).await {
             Some(s) => stream = s,
             None => {
                 if let Some(c) = core.upgrade() {
@@ -807,8 +895,9 @@ async fn write_frames(
                     }
                 }
                 Some(Outgoing::Frame(..)) => trace!("frame for a lost socket dropped"),
-                Some(Outgoing::Shutdown) => return Stop::Shutdown,
-                None => return Stop::Dropped,
+                // The channel can't close here: the reader holds the core,
+                // and with it the sender. Shutting down is right either way.
+                Some(Outgoing::Shutdown) | None => return Stop::Shutdown,
             },
             _ = &mut *reader => return Stop::Lost,
         }
@@ -816,15 +905,15 @@ async fn write_frames(
 }
 
 /// Connects again on `retry`'s schedule, dropping whatever is queued
-/// meanwhile. `None` if it gave up, or the connection was closed or dropped.
+/// meanwhile. `None` if it gave up, or the connection was closed or dropped
+/// (dropping the core closes the channel).
 async fn reconnect(
-    core: &Weak<Core>,
     rx: &mut mpsc::UnboundedReceiver<Outgoing>,
     link: &Link,
     retry: Retry,
 ) -> Option<UnixStream> {
     let start = tokio::time::Instant::now();
-    let mut delay = retry.initial;
+    let mut delay = retry.first_delay();
     loop {
         // Nothing queued so far may reach the new socket.
         loop {
@@ -840,7 +929,7 @@ async fn reconnect(
             Ok(stream) => return Some(stream),
             Err(e) => debug!(error = %e, ?delay, "reconnect failed"),
         }
-        if start.elapsed() + delay > retry.max_elapsed {
+        if retry.gives_up(start.elapsed(), delay) {
             warn!(elapsed = ?start.elapsed(), "giving up reconnecting to rtrouted");
             return None;
         }
@@ -855,10 +944,7 @@ async fn reconnect(
                 },
             }
         }
-        if core.strong_count() == 0 {
-            return None;
-        }
-        delay = (delay * 2).min(retry.max_delay);
+        delay = retry.next_delay(delay);
     }
 }
 

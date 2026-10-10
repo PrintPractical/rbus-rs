@@ -435,3 +435,52 @@ mod derived {
         assert!(format!("{handle:?}").contains("connected: false"));
     }
 }
+
+#[tokio::test]
+async fn p3_a_cancelled_registration_leaves_no_names_behind() {
+    let l = Listener::new();
+    let (bus, mut peer) = l.connect(short()).await;
+    let route = bus.inner.conn.component_route;
+    let provide = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.provide(Model).await }
+    });
+    let mut regs = Vec::new();
+    for name in NAMES {
+        regs.push(expect_alias(&mut peer, 1, name, route).await);
+    }
+    // The caller gives up while the requests are in flight.
+    provide.abort();
+    assert!(provide.await.unwrap_err().is_cancelled());
+    // One name turns out to be taken; the other two registered, so they are
+    // ours to remove again. The taken one is not: rtrouted would remove the
+    // other component's alias.
+    peer.reply_json(&regs[0], &ResultReply { result: 1001 })
+        .await;
+    for f in &regs[1..] {
+        peer.reply_json(f, &ResultReply { result: 0 }).await;
+    }
+    for name in &NAMES[1..] {
+        expect_alias(&mut peer, 0, name, route).await;
+    }
+    assert!(bus.inner.conn.aliases().is_empty());
+
+    // The names can be claimed again.
+    let provide = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.provide(Model).await }
+    });
+    let mut regs = Vec::new();
+    for name in NAMES {
+        regs.push(expect_alias(&mut peer, 1, name, route).await);
+    }
+    for f in &regs {
+        peer.reply_json(f, &ResultReply { result: 0 }).await;
+    }
+    let provided = provide.await.unwrap().unwrap();
+    assert_eq!(bus.inner.conn.aliases().len(), NAMES.len());
+    drop(provided);
+    for name in NAMES {
+        expect_alias(&mut peer, 0, name, route).await;
+    }
+}

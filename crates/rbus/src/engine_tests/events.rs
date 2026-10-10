@@ -342,6 +342,67 @@ async fn d12_a_slow_consumer_sees_lagged() {
 }
 
 #[tokio::test]
+async fn d12_dropping_a_full_block_subscription_frees_the_connection() {
+    let l = Listener::new();
+    let (bus, mut peer) = l.connect(short()).await;
+    let sub = tokio::spawn({
+        let bus = bus.clone();
+        async move {
+            bus.subscribe::<Object>("Device.E!")
+                .buffer(1)
+                .overflow(Overflow::Block)
+                .await
+        }
+    });
+    expect_advisory_route(&mut peer).await;
+    let req = peer.recv().await;
+    let id = request::<SubscribeRequest>(&req, Method::Subscribe)
+        .options
+        .unwrap()
+        .component_id;
+    reply_subscribe(&mut peer, &req, subscribed(1)).await;
+    let sub = sub.await.unwrap().unwrap();
+    // The second event fills the queue; the reader waits on the third.
+    for i in 0..3u8 {
+        peer.send(event_frame(
+            bus.inbox(),
+            "Device.E!",
+            event(
+                "Device.E!",
+                EventKind::General,
+                Object::new().with("i", i),
+                id,
+            ),
+        ))
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Dropping the subscription must release the reader, or no reply would
+    // ever be read again.
+    drop(sub);
+    let unsub = peer.recv().await;
+    let _: SubscribeRequest = request(&unsub, Method::Unsubscribe);
+    let get = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.get::<u32>("Device.A").await }
+    });
+    let req = peer.recv().await;
+    peer.reply_rbus(
+        &req,
+        &get_ok(vec![Property::new("Device.A", Value::U32(1))]),
+    )
+    .await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), get)
+            .await
+            .expect("the reader is stuck")
+            .unwrap()
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn d12_block_overflow_holds_the_connection() {
     let l = Listener::new();
     let (bus, mut peer) = l.connect(short()).await;
@@ -630,6 +691,29 @@ async fn c3_c5_get_tree_fans_out_and_reports_failures() {
     assert_eq!(tree.failures().len(), 1);
     assert_eq!(tree.failures()[0].component, "compB");
     assert_eq!(tree.failures()[0].error.status(), Some(Status::BusError));
+
+    // An empty answer from one component still counts: the call succeeds
+    // with an empty tree and reports the other's failure.
+    let get = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.get_tree("Device.W.").await }
+    });
+    let q = peer.recv().await;
+    peer.reply_json(
+        &q,
+        &DiscoveryReply {
+            result: Some(0),
+            count: 2,
+            items: vec!["compA".into(), "compB".into()],
+        },
+    )
+    .await;
+    let a = peer.recv().await;
+    let b = peer.recv().await;
+    peer.reply_rbus(&a, &get_ok(vec![])).await;
+    peer.undeliverable(&b).await;
+    let tree = get.await.unwrap().unwrap();
+    assert_eq!((tree.iter().count(), tree.failures().len()), (0, 1));
 
     // Every component failing fails the call.
     let get = tokio::spawn({

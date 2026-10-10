@@ -275,9 +275,7 @@ async fn unsubscribe_once(core: &Arc<Core>, name: &str, id: i32) -> Result<()> {
 /// replies, and forgets them (L13).
 pub(crate) fn unsubscribe_all(core: &Arc<Core>) {
     for (id, name) in core.sub_names() {
-        if let Some(sub) = core.remove_sub(id) {
-            sub.queue.close();
-        }
+        core.remove_sub(id);
         drop(start(core, Method::Unsubscribe, &name, id, false));
     }
 }
@@ -471,7 +469,7 @@ impl<'a, I: Send + 'static> IntoFuture for SubscribeBuilder<'a, I> {
                     armed: true,
                 };
                 let started = tokio::time::Instant::now();
-                let mut delay = self.retry.map(|r| r.initial);
+                let mut delay = self.retry.map(|r| r.first_delay());
                 let resp = loop {
                     match subscribe_once(core, &name, id, self.initial).await {
                         Err(Error::NotFound(n)) => {
@@ -480,14 +478,14 @@ impl<'a, I: Send + 'static> IntoFuture for SubscribeBuilder<'a, I> {
                                 core.remove_sub(id);
                                 return Err(Error::NotFound(n));
                             };
-                            if started.elapsed() + d > retry.max_elapsed {
+                            if retry.gives_up(started.elapsed(), d) {
                                 guard.armed = false;
                                 core.remove_sub(id);
                                 return Err(Error::NotFound(n));
                             }
                             debug!(?d, "no provider yet; retrying");
                             tokio::time::sleep(d).await;
-                            delay = Some((d * 2).min(retry.max_delay));
+                            delay = Some(retry.next_delay(d));
                         }
                         other => break other?,
                     }
@@ -552,7 +550,6 @@ impl<I> Subscription<I> {
     /// Unsubscribes and waits for the provider to confirm (E2).
     pub async fn unsubscribe(mut self) -> Result<()> {
         self.active = false;
-        self.queue.close();
         let core = &self.bus.inner.conn;
         core.remove_sub(self.id);
         unsubscribe_once(core, &self.name, self.id)

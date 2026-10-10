@@ -115,7 +115,9 @@ async fn l5_reconnect_registers_everything_again() {
         regs.push(f);
     }
     assert_eq!(names, NAMES.iter().map(|n| n.to_string()).collect());
-    // A name taken meanwhile is logged; the rest carries on.
+    // A name another component took meanwhile is given up; the rest
+    // carries on.
+    let taken: Route = control::decode(&regs[0].payload).unwrap();
     peer.reply_json(&regs[0], &ResultReply { result: 1001 })
         .await;
     for f in &regs[1..] {
@@ -161,13 +163,29 @@ async fn l5_reconnect_registers_everything_again() {
     .await;
     assert_eq!(get.await.unwrap().unwrap(), 3);
 
-    // Dropping the provider removes its names, so a later reconnect
-    // wouldn't register them.
+    // Dropping the provider removes the names it still holds, so a later
+    // reconnect wouldn't register them. The taken name is never removed:
+    // rtrouted would remove the other component's alias.
+    assert!(!bus.inner.conn.aliases().contains(&taken.topic));
     drop(provided);
-    for name in NAMES {
+    for name in NAMES.iter().filter(|n| **n != taken.topic) {
         expect_alias(&mut peer, 0, name, route).await;
     }
     assert!(bus.inner.conn.aliases().is_empty());
+    let closing = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.close().await }
+    });
+    // Closing unsubscribes and unregisters the component and inbox, and
+    // still leaves the taken name alone.
+    while let Some(f) = peer.try_recv().await {
+        if f.header.topic == control::TOPIC_SUBSCRIBE {
+            let r: Route = control::decode(&f.payload).unwrap();
+            assert_ne!(r.topic, taken.topic, "removed a name we don't own");
+        }
+    }
+    drop(peer);
+    closing.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -305,4 +323,26 @@ async fn l5_garbage_from_the_broker_reconnects() {
     let mut peer = l.accept().await;
     expect_route(&mut peer, bus.inbox(), 1).await;
     wait_for(&bus, ConnectionState::Connected).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn l5_closed_stays_closed() {
+    let l = Listener::new();
+    let (bus, peer) = l
+        .connect_with(
+            Rbus::builder("test.component")
+                .timeouts(crate::Timeouts::uniform(Duration::from_millis(50)))
+                .reconnect(quick()),
+        )
+        .await;
+    // The broker never closes its side, so close() gives up and drops the
+    // connection itself; losing the socket after that changes nothing.
+    bus.close().await.unwrap();
+    drop(peer);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(*bus.state().borrow(), ConnectionState::Closed);
+    assert!(matches!(
+        bus.get::<u32>("Device.X").await,
+        Err(Error::Disconnected)
+    ));
 }

@@ -49,11 +49,58 @@ impl Retry {
         self.max_elapsed = d;
         self
     }
+
+    /// The first delay. Never zero, so a retry loop can't spin.
+    pub(crate) fn first_delay(&self) -> Duration {
+        self.initial.max(MIN_DELAY)
+    }
+
+    /// The delay after `d`: doubled, up to the maximum.
+    pub(crate) fn next_delay(&self, d: Duration) -> Duration {
+        d.saturating_mul(2).min(self.max_delay).max(MIN_DELAY)
+    }
+
+    /// True if waiting `next` more after `elapsed` goes past the deadline.
+    pub(crate) fn gives_up(&self, elapsed: Duration, next: Duration) -> bool {
+        elapsed.saturating_add(next) > self.max_elapsed
+    }
 }
+
+impl Default for Retry {
+    /// [`Retry::exponential`].
+    fn default() -> Retry {
+        Retry::exponential()
+    }
+}
+
+/// The shortest delay between attempts, whatever the schedule says.
+const MIN_DELAY: Duration = Duration::from_millis(1);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedules_never_spin_or_overflow() {
+        let zero = Retry::exponential()
+            .initial(Duration::ZERO)
+            .max_delay(Duration::ZERO);
+        assert_eq!(zero.first_delay(), MIN_DELAY);
+        assert_eq!(zero.next_delay(Duration::ZERO), MIN_DELAY);
+        let huge = Retry::exponential()
+            .initial(Duration::MAX)
+            .max_delay(Duration::MAX)
+            .max_elapsed(Duration::MAX);
+        assert_eq!(huge.next_delay(Duration::MAX), Duration::MAX);
+        assert!(!huge.gives_up(Duration::MAX, Duration::MAX));
+        let r = Retry::exponential();
+        assert_eq!(
+            r.next_delay(Duration::from_secs(40)),
+            Duration::from_secs(60)
+        );
+        assert!(r.gives_up(Duration::from_secs(590), Duration::from_secs(20)));
+        assert_eq!(Retry::default(), r);
+    }
 
     #[test]
     fn builder_sets_each_limit() {

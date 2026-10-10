@@ -192,6 +192,7 @@ impl Rbus {
                 properties: Vec::new(),
                 failures: Vec::new(),
             };
+            let mut succeeded = false;
             for (component, call) in pending {
                 let result = match call {
                     Ok(call) => call.await,
@@ -204,11 +205,15 @@ impl Rbus {
                         status,
                     }),
                 }) {
-                    Ok(props) => tree.properties.extend(props),
+                    Ok(props) => {
+                        succeeded = true;
+                        tree.properties.extend(props);
+                    }
                     Err(error) => tree.failures.push(TreeFailure { component, error }),
                 }
             }
-            if tree.properties.is_empty() && !tree.failures.is_empty() {
+            // An empty answer is still an answer.
+            if !succeeded && !tree.failures.is_empty() {
                 return Err(tree.failures.remove(0).error);
             }
             Ok(tree)

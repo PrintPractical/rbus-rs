@@ -6,7 +6,6 @@ use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rbus_wire::control::{self, ResultReply};
 use tracing::{Instrument, debug, debug_span};
 
 use crate::bus::Rbus;
@@ -19,13 +18,6 @@ use crate::provider::handle::{Handle, element_error};
 use crate::provider::model::{MountId, SchemaError};
 use crate::subscribe::RowId;
 use crate::types::IntoValue;
-
-/// The broker's answer to an alias that is already registered
-/// (`RT_ERROR_DUPLICATE_ENTRY`).
-const ALIAS_DUPLICATE: i32 = 1001;
-/// The broker's answer to an alias that clashes with a table or property
-/// (`RT_ERROR_PROTOCOL_ERROR`), which rbus maps to `INVALID_NAMESPACE`.
-const ALIAS_CONFLICT: i32 = 1003;
 
 impl Rbus {
     /// Registers `provider` and serves its data model until the returned
@@ -149,7 +141,7 @@ pub struct Provided<P> {
     bus: Rbus,
     id: MountId,
     handle: Handle,
-    /// The aliases registered with the broker.
+    /// The element names claimed for this provider.
     names: Vec<String>,
 }
 
@@ -158,42 +150,20 @@ impl<P> Provided<P> {
     /// flight at once (`rbus_addElement`). On any failure, the aliases that
     /// did register are removed again, as `rbus_regDataElements` does.
     async fn register(mut self, names: Vec<String>) -> Result<Self> {
-        let conn = &self.bus.inner.conn;
-        // Claimed before the requests go out, so a reconnect meanwhile
-        // registers them again.
-        let pending = conn.add_aliases(&names);
-        let mut failure = None;
-        let mut failed = Vec::new();
-        for (name, request) in pending {
-            let reply = match request {
-                Ok(p) => p.wait(self.bus.inner.timeouts.broker, "register").await,
-                Err(e) => Err(e),
-            };
-            let result =
-                reply.and_then(|frame| Ok(control::decode::<ResultReply>(&frame.payload)?.result));
-            match result {
-                Ok(0) => self.names.push(name),
-                Ok(code) => {
-                    let s = match code {
-                        ALIAS_DUPLICATE => Status::ElementNameDuplicate,
-                        ALIAS_CONFLICT => Status::InvalidNamespace,
-                        _ => Status::BusError,
-                    };
-                    failure.get_or_insert_with(|| status(&name, s));
-                    failed.push(name);
-                }
-                Err(e) => {
-                    failure.get_or_insert(e);
-                    failed.push(name);
-                }
-            }
-        }
-        match failure {
-            // Dropping `self` unregisters what did register.
-            Some(e) => {
-                conn.remove_aliases(&failed, false);
-                Err(e)
-            }
+        // Held before anything is awaited: if this future is dropped, the
+        // `Provided` releases every claimed name.
+        self.names = names.clone();
+        let results = self
+            .bus
+            .inner
+            .conn
+            .claim_aliases(names)
+            .await
+            .map_err(|_| Error::Disconnected)?;
+        match results.into_iter().find_map(|(_, r)| r.err()) {
+            // Dropping `self` releases the names, including those that did
+            // register.
+            Some(e) => Err(e),
             None => {
                 debug!(names = self.names.len(), "provider registered");
                 Ok(self)
@@ -284,7 +254,7 @@ impl<P> Drop for Provided<P> {
     /// does) and the provider's rows.
     fn drop(&mut self) {
         let conn = &self.bus.inner.conn;
-        conn.remove_aliases(&self.names, true);
+        conn.release_aliases(&self.names);
         conn.registry.unmount(self.id);
     }
 }
