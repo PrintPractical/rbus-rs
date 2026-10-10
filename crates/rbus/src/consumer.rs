@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 use rbus_wire::body::{GetRequest, GetResponse, RpcRequest, RpcResponse, SetRequest, SetResponse};
-use rbus_wire::control::{self, DiscoveryReply, NameList};
 use rbus_wire::frame::{Flags, Frame};
 use rbus_wire::message::{Body, Method, TraceContext, request_payload, split_method_payload};
 use rbus_wire::value::{Property, Value};
@@ -52,7 +51,7 @@ impl Rbus {
     }
 
     /// Sends an rbus request now; the returned future waits for the reply.
-    fn start_call<B: Body, Q: Body>(
+    pub(crate) fn start_call<B: Body, Q: Body>(
         &self,
         topic: &str,
         method: Method,
@@ -85,18 +84,6 @@ impl Rbus {
             }
         }
         Ok(owners)
-    }
-
-    async fn trace_origin(&self, names: &[PropertyName]) -> Result<Vec<String>> {
-        let list = NameList::new(names.iter().map(|n| n.to_string()).collect());
-        let frame = self
-            .inner
-            .conn
-            .broker_request(control::TOPIC_TRACE_ORIGIN, &list)?
-            .wait(self.inner.timeouts.broker, "owner lookup")
-            .await?;
-        let reply: DiscoveryReply = control::decode(&frame.payload)?;
-        Ok(reply.items)
     }
 
     /// Gets one property (C1).

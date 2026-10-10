@@ -27,6 +27,8 @@ pub struct Timeouts {
     pub invoke: Duration,
     /// Queries to the broker itself, such as owner lookups; 5 s.
     pub broker: Duration,
+    /// `subscribe` and `unsubscribe`, per attempt; 15 s.
+    pub subscribe: Duration,
 }
 
 impl Default for Timeouts {
@@ -37,6 +39,7 @@ impl Default for Timeouts {
             set_many: Duration::from_secs(60),
             invoke: Duration::from_secs(15),
             broker: Duration::from_secs(5),
+            subscribe: Duration::from_secs(15),
         }
     }
 }
@@ -50,6 +53,7 @@ impl Timeouts {
             set_many: d,
             invoke: d,
             broker: d,
+            subscribe: d,
         }
     }
 }
@@ -163,7 +167,7 @@ impl RbusBuilder {
     /// Connects and registers the component.
     pub async fn connect(self) -> Result<Rbus> {
         check_component(&self.component)?;
-        let conn = Conn::connect(&self.socket, &self.component, self.timeouts.broker).await?;
+        let conn = Conn::connect(&self.socket, &self.component, self.timeouts).await?;
         Ok(Rbus {
             inner: Arc::new(Inner {
                 conn,

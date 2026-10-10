@@ -61,3 +61,10 @@ pub fn wait_for_routes(pred: impl Fn(&str) -> bool) -> String {
 pub fn lists(routes: &str, route: &str) -> bool {
     routes.contains(&format!("\"{route}\""))
 }
+
+/// Waits up to `secs` seconds for the next item of a stream.
+pub async fn within<F: std::future::Future>(secs: u64, f: F) -> F::Output {
+    tokio::time::timeout(Duration::from_secs(secs), f)
+        .await
+        .expect("timed out waiting for the bus")
+}

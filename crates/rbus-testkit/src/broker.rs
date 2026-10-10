@@ -92,6 +92,19 @@ impl RawClient {
         Ok(self.seq)
     }
 
+    /// Answers `req` as a provider would: same sequence number, topics swapped.
+    pub fn respond(&mut self, req: &Frame, flags: u32, payload: &[u8]) -> io::Result<()> {
+        let frame = encode_frame(
+            req.header.seq,
+            flags | FLAG_RESPONSE,
+            0,
+            &req.header.reply_topic,
+            &req.header.topic,
+            payload,
+        );
+        self.stream.write_all(&frame)
+    }
+
     /// Reads the next frame (5 s timeout).
     pub fn recv(&mut self) -> io::Result<Frame> {
         read_frame(&mut self.stream)?.ok_or_else(|| io::ErrorKind::UnexpectedEof.into())

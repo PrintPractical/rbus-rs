@@ -34,8 +34,13 @@ mod bus;
 mod conn;
 mod consumer;
 mod convert;
+mod discover;
 mod error;
 pub mod name;
+mod queue;
+mod subscribe;
+mod table;
+mod tree;
 mod types;
 
 #[cfg(test)]
@@ -45,9 +50,16 @@ pub use bus::{DEFAULT_SOCKET, Rbus, RbusBuilder, Timeouts};
 pub use conn::ConnectionState;
 pub use consumer::{SetMany, Values};
 pub use convert::{from_object, from_value, to_object, to_value};
+pub use discover::{Advisories, Advisory, Discover};
 pub use error::{Error, Result, Status, TypeError};
 pub use name::{EventName, IntoName, MethodName, Name, NameError, PropertyName, TablePath};
+pub use queue::Overflow;
 pub use rbus_wire::value::{DateTime, Object, ObjectKind, Property, Value};
+pub use subscribe::{
+    EventError, Retry, RowEvent, RowId, SubscribeBuilder, Subscription, ValueChange,
+};
+pub use table::{AddRow, RowRef, Table};
+pub use tree::{Tree, TreeFailure};
 pub use types::{IntoValue, RbusType};
 
 /// The wire codecs this crate is built on.
