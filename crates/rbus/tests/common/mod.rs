@@ -3,6 +3,8 @@
 //! multi-threaded runtime, because the fixtures block while C peers start.
 #![allow(dead_code)]
 
+pub mod model;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,4 +69,36 @@ pub async fn within<F: std::future::Future>(secs: u64, f: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(secs), f)
         .await
         .expect("timed out waiting for the bus")
+}
+
+/// Runs `rbuscli` with `args` and returns what it printed. `rbuscli` exits
+/// with 0 whatever happens, so tests check its output.
+pub async fn rbuscli(args: &[&str]) -> String {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("rbuscli")
+            .args(&args)
+            .output()
+            .expect("run rbuscli")
+    })
+    .await
+    .unwrap();
+    String::from_utf8_lossy(&out.stdout).replace('\r', "")
+}
+
+/// The `Name` / `Value` pairs `rbuscli get` and method calls print.
+pub fn rbuscli_values(out: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut name = None;
+    for line in out.lines() {
+        let line = line.trim();
+        if let Some(n) = line.strip_prefix("Name  : ") {
+            name = Some(n.to_owned());
+        } else if let Some(v) = line.strip_prefix("Value : ") {
+            if let Some(n) = name.take() {
+                found.push((n, v.to_owned()));
+            }
+        }
+    }
+    found
 }

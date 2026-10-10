@@ -138,6 +138,37 @@ impl Status {
         }
     }
 
+    /// The text the C library gives this status (`rbusError_ToString`,
+    /// `rbus.c:6505-6533`). C providers put it in a failed method's
+    /// `error_string`; codes C has no text for read "unknown error".
+    pub fn c_message(self) -> &'static str {
+        match self {
+            Status::Success => "ok",
+            Status::BusError => "generic error",
+            Status::InvalidInput => "invalid input",
+            Status::NotInitialized => "not initialized",
+            Status::OutOfResources => "out of resources",
+            Status::DestinationNotFound => "destination not found",
+            Status::DestinationNotReachable => "destination not reachable",
+            Status::DestinationResponseFailure => "destination response failure",
+            Status::InvalidResponseFromDestination => "invalid response from destination",
+            Status::InvalidOperation => "invalid operation",
+            Status::InvalidEvent => "invalid event",
+            Status::InvalidHandle => "invalid handle",
+            Status::SessionAlreadyExist => "session already exists",
+            Status::ComponentNameDuplicate => "duplicate component name",
+            Status::ElementNameDuplicate => "duplicate element name",
+            Status::ElementNameMissing => "name missing",
+            Status::ComponentDoesNotExist => "component does not exist",
+            Status::ElementDoesNotExist => "element name does not exist",
+            Status::AccessNotAllowed => "access denied",
+            Status::InvalidContext => "invalid context",
+            Status::Timeout => "timeout",
+            Status::AsyncResponse => "async operation in progress",
+            _ => "unknown error",
+        }
+    }
+
     /// True for [`Status::Success`].
     pub fn is_success(self) -> bool {
         self == Status::Success
@@ -191,5 +222,23 @@ mod tests {
         assert_eq!(Status::NotWritable.to_string(), "NotWritable (27)");
         assert_eq!(Status::Other(42).to_string(), "unknown status 42");
         assert!(Status::Success.is_success() && !Status::BusError.is_success());
+    }
+
+    #[test]
+    fn c_messages_match_rbus_error_to_string() {
+        assert_eq!(Status::Success.c_message(), "ok");
+        assert_eq!(Status::InvalidOperation.c_message(), "invalid operation");
+        assert_eq!(
+            Status::ElementDoesNotExist.c_message(),
+            "element name does not exist"
+        );
+        assert_eq!(
+            Status::AsyncResponse.c_message(),
+            "async operation in progress"
+        );
+        let named = CURRENT.iter().filter(|s| s.c_message() != "unknown error");
+        assert_eq!(named.count(), 22);
+        assert_eq!(Status::NotWritable.c_message(), "unknown error");
+        assert_eq!(Status::Other(99).c_message(), "unknown error");
     }
 }

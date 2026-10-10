@@ -320,10 +320,14 @@ impl Body for AddRowRequest {
         w.str(self.alias.as_deref().unwrap_or(""));
     }
     fn decode(r: &mut Reader<'_>) -> Result<Self> {
+        let session_id = r.i32()? as u32;
+        let table = r.str()?;
+        // CCSP callers leave the alias out (`rbus.c:2359-2361`).
+        let alias = if r.is_empty() { None } else { Some(r.str()?) };
         Ok(AddRowRequest {
-            session_id: r.i32()? as u32,
-            table: r.str()?,
-            alias: Some(r.str()?).filter(|a| !a.is_empty()),
+            session_id,
+            table,
+            alias: alias.filter(|a| !a.is_empty()),
         })
     }
 }
@@ -761,6 +765,13 @@ mod tests {
             row: "Device.Tables1.T1.[myalias].".into(),
         });
         round_trip(&StatusResponse { status: 0 });
+        // A CCSP add-row request has no alias at all.
+        let mut w = Writer::new();
+        w.i32(0);
+        w.str("T.");
+        let bytes = w.into_bytes();
+        let req = AddRowRequest::decode(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!((req.table.as_str(), req.alias), ("T.", None));
     }
 
     #[test]
