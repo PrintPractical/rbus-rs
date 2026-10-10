@@ -12,10 +12,12 @@ use tracing::{Instrument, debug, debug_span};
 use crate::bus::Rbus;
 use crate::error::{Error, Result, Status};
 use crate::name::{IntoName, Name, TablePath};
-use crate::provider::Provider;
 use crate::provider::engine::DynProvider;
+use crate::provider::events::{NoStore, SubscriberInfo, SubscriberStore, SubscriptionEvents};
 use crate::provider::model::{MountId, SchemaError};
+use crate::provider::{Outbox, Provider};
 use crate::subscribe::RowId;
+use crate::types::IntoValue;
 
 /// The broker's answer to an alias that is already registered
 /// (`RT_ERROR_DUPLICATE_ENTRY`).
@@ -43,6 +45,7 @@ impl Rbus {
             bus: self.clone(),
             provider,
             serialized: false,
+            store: Arc::new(NoStore),
         }
     }
 }
@@ -53,6 +56,7 @@ pub struct Provide<P> {
     bus: Rbus,
     provider: P,
     serialized: bool,
+    store: Arc<dyn SubscriberStore>,
 }
 
 impl<P: Provider> Provide<P> {
@@ -61,6 +65,14 @@ impl<P: Provider> Provide<P> {
     /// runs as its own task.
     pub fn serialized(mut self) -> Self {
         self.serialized = true;
+        self
+    }
+
+    /// Keeps the provider's subscribers in `store`, so they survive a
+    /// restart (D11). Subscribers it held are restored at registration,
+    /// unless their process is gone. The default keeps nothing.
+    pub fn subscriber_store(mut self, store: impl SubscriberStore) -> Self {
+        self.store = Arc::new(store);
         self
     }
 }
@@ -90,6 +102,7 @@ impl<P: Provider> IntoFuture for Provide<P> {
                 bus,
                 provider,
                 serialized,
+                store,
             } = self;
             let schema = provider.schema();
             let span = debug_span!("rbus.provide", elements = schema.elements().len());
@@ -104,7 +117,7 @@ impl<P: Provider> IntoFuture for Provide<P> {
                 let dyn_provider: Arc<dyn DynProvider> = provider.clone();
                 let id = conn
                     .registry
-                    .mount(schema, dyn_provider, serialized)
+                    .mount_with(schema, dyn_provider, serialized, store)
                     .map_err(schema_error)?;
                 let provided = Provided {
                     provider,
@@ -112,7 +125,9 @@ impl<P: Provider> IntoFuture for Provide<P> {
                     id,
                     names: Vec::with_capacity(names.len()),
                 };
-                provided.register(names).await
+                let provided = provided.register(names).await?;
+                conn.registry.restore(id, &***conn);
+                Ok(provided)
             }
             .instrument(span)
             .await
@@ -192,7 +207,7 @@ impl<P> Provided<P> {
             .inner
             .conn
             .registry
-            .add_local_row(self.id, &table, row.into())
+            .add_local_row(self.id, &table, row.into(), self.outbox())
             .map_err(|status| Error::Status {
                 name: table.into(),
                 status,
@@ -206,7 +221,7 @@ impl<P> Provided<P> {
             .inner
             .conn
             .registry
-            .remove_local_row(self.id, &table, inst)
+            .remove_local_row(self.id, &table, inst, self.outbox())
             .map_err(|status| Error::Status {
                 name: table.into(),
                 status,
@@ -230,6 +245,90 @@ impl<P> Provided<P> {
     /// The connection this provider is registered on.
     pub fn bus(&self) -> &Rbus {
         &self.bus
+    }
+
+    fn outbox(&self) -> &dyn Outbox {
+        &**self.bus.inner.conn
+    }
+
+    fn element_error(name: &str, status: Status) -> Error {
+        self::status(name, status)
+    }
+
+    /// Publishes a general event to its subscribers (P4). `data` is any
+    /// serializable value that converts to an object, such as a struct or
+    /// an [`Object`](crate::Object). With no subscribers it does nothing
+    /// (D10).
+    ///
+    /// ```no_run
+    /// # fn demo(provided: rbus::provider::Provided<impl rbus::provider::Provider>) -> rbus::Result<()> {
+    /// #[derive(serde::Serialize)]
+    /// struct Alarm { level: u32 }
+    /// provided.publish("Device.WiFi.Alarm!", &Alarm { level: 3 })?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Fails with [`Status::ElementDoesNotExist`] unless `event` is an event
+    /// of this provider's schema (rows included), and with
+    /// [`Error::Type`] if `data` isn't an object.
+    pub fn publish<T: serde::Serialize + ?Sized>(&self, event: &str, data: &T) -> Result<()> {
+        let data = crate::convert::to_object(data)?;
+        self.bus
+            .inner
+            .conn
+            .registry
+            .publish_event(self.id, self.outbox(), event, data)
+            .map_err(|s| Self::element_error(event, s))
+    }
+
+    /// Publishes a change of a property's value that the provider made
+    /// itself (P9): subscribers get `{value, oldValue, by}`, with `by` our
+    /// component, and filters apply. Nothing is sent if the values are
+    /// equal or nobody is subscribed.
+    pub fn publish_value_change(
+        &self,
+        property: &str,
+        old: impl IntoValue,
+        new: impl IntoValue,
+    ) -> Result<()> {
+        self.bus
+            .inner
+            .conn
+            .registry
+            .publish_change(
+                self.id,
+                self.outbox(),
+                property,
+                old.into_value(),
+                new.into_value(),
+            )
+            .map_err(|s| Self::element_error(property, s))
+    }
+
+    /// Reads a property through [`Provider::get`] and, if its value differs
+    /// from the last one its subscribers saw, publishes the change. Use it
+    /// when the provider knows a value changed but not the old value.
+    pub async fn notify_changed(&self, property: &str) -> Result<()> {
+        self.bus
+            .inner
+            .conn
+            .registry
+            .notify_changed(self.id, self.outbox(), property)
+            .await
+            .map_err(|s| Self::element_error(property, s))
+    }
+
+    /// The current subscribers to this provider's elements (P8). With a
+    /// name, only the subscriptions that cover it: an exact subscription,
+    /// or a pattern (`*`, `[alias]`) that matches it now.
+    pub fn subscribers(&self, name: Option<&str>) -> Vec<SubscriberInfo> {
+        self.bus.inner.conn.registry.subscribers(self.id, name)
+    }
+
+    /// A stream of consumers subscribing and unsubscribing (P8). It ends
+    /// when this `Provided` is dropped.
+    pub fn subscription_events(&self) -> SubscriptionEvents {
+        self.bus.inner.conn.registry.listen(self.id)
     }
 }
 

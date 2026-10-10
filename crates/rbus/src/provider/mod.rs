@@ -44,6 +44,7 @@
 
 mod context;
 mod engine;
+mod events;
 mod fault;
 mod model;
 mod provided;
@@ -54,11 +55,13 @@ use std::future::Future;
 use rbus_wire::value::{Object, Value};
 
 pub use context::{Change, Context, Transaction};
+pub use events::{NoStore, SubscriberInfo, SubscriberStore, SubscriptionEvent, SubscriptionEvents};
 pub use fault::{Fault, SetFault};
 pub use provided::{Provide, Provided};
+pub use rbus_wire::event::{Filter, RelationOp};
 pub use schema::{Access, Element, ElementKind, Rows, Schema};
 
-pub(crate) use engine::{Registry, serve};
+pub(crate) use engine::{Outbox, Registry, serve};
 
 use crate::name::{MethodName, PropertyName, TablePath};
 use crate::subscribe::RowId;
@@ -135,5 +138,19 @@ pub trait Provider: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), Fault>> + Send {
         let _ = (cx, table, row);
         async { Err(Fault::not_allowed()) }
+    }
+
+    /// A consumer subscribes to one of the provider's elements. Return an
+    /// error to refuse; the consumer gets its status, as C's
+    /// `eventSubHandler` allows. Accepts by default. Unsubscribes and
+    /// disconnects aren't asked; watch them with
+    /// [`Provided::subscription_events`].
+    fn on_subscribe(
+        &self,
+        cx: &Context,
+        subscriber: &SubscriberInfo,
+    ) -> impl Future<Output = Result<(), Fault>> + Send {
+        let _ = (cx, subscriber);
+        async { Ok(()) }
     }
 }

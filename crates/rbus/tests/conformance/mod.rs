@@ -5,12 +5,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use rbus::provider::{
-    Access, Context, Fault, Provided, Provider, Rows, Schema, SetFault, Transaction,
+    Access, Context, Fault, Provided, Provider, Rows, Schema, SetFault, SubscriberInfo, Transaction,
 };
 use rbus::{
     DateTime, MethodName, Object, Property, PropertyName, Rbus, RowId, Status, TablePath, Value,
@@ -91,11 +92,87 @@ fn leaf(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+/// How often C polls subscribed properties (`RBUS_VALUECHANGE_PERIOD`).
+const VC_PERIOD: Duration = Duration::from_secs(2);
+
+/// The read counters behind the value-change properties, which fake a change
+/// every so many reads, as `rbusTestProvider`'s getters do.
+#[derive(Default)]
+struct Counters {
+    vc: u32,
+    /// `VCParamInt{i}` / `VCParamStr{i}`: reads, current value, step.
+    int: [(i32, i32, i32); 6],
+    str: [(i32, i32, i32); 6],
+    /// `EventsTable.{i}.Prop`: reads.
+    events_table: [i32; 10],
+}
+
+/// One step of `getVCIntHandler`: every second read moves the value one
+/// step between 0 and 5.
+fn vc_step(state: &mut (i32, i32, i32)) -> i32 {
+    let (count, data, delta) = state;
+    if *delta == 0 {
+        *delta = 1;
+    }
+    *count += 1;
+    if *count % 2 == 0 {
+        *data += *delta;
+        if *data == 5 {
+            *delta = -1;
+        } else if *data == 0 {
+            *delta = 1;
+        }
+    }
+    *data
+}
+
+/// The digit after `prefix` in `name`: the index of `VCParamInt3`, the row
+/// of `EventsTable.2.Prop` (`getEventTableInstNum`).
+fn index_after(name: &str, prefix: &str) -> usize {
+    name.split(prefix)
+        .nth(1)
+        .and_then(|rest| rest.chars().next())
+        .and_then(|c| c.to_digit(10))
+        .unwrap_or(0) as usize
+}
+
 /// The conformance provider. Values live in one map by canonical name; table
 /// rows are numbered from 1 per table and never reused, as in the C provider.
 pub struct Conformance {
     values: Mutex<HashMap<String, Value>>,
     next_inst: Mutex<HashMap<String, u32>>,
+    counters: Mutex<Counters>,
+    by_value: AtomicI32,
+    /// Set by `TestProviderNotFound`; the main loop counts the seconds since.
+    provider_not_found: AtomicU32,
+}
+
+/// The provider `rbusTestProvider` registers 20 s after
+/// `TestProviderNotFound` is set: one event.
+struct LateEvent;
+
+impl Provider for LateEvent {
+    fn schema(&self) -> Schema {
+        Schema::new().event(name("ProviderNotFoundEvent1!"))
+    }
+
+    async fn get(&self, _cx: &Context, _name: &PropertyName) -> Result<Value, Fault> {
+        Err(Fault::not_allowed())
+    }
+}
+
+/// A running conformance provider: the registration plus the task that does
+/// what `rbusTestProvider`'s `main` loop does every second. Dropping it stops
+/// both.
+pub struct Running {
+    pub provided: Arc<Provided<Conformance>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl Conformance {
@@ -113,14 +190,17 @@ impl Conformance {
         Conformance {
             values: Mutex::new(values),
             next_inst: Mutex::new(HashMap::new()),
+            counters: Mutex::new(Counters::default()),
+            by_value: AtomicI32::new(0),
+            provider_not_found: AtomicU32::new(0),
         }
     }
 
-    /// Registers the provider and adds the `PartialPath1` and `PartialPath2`
-    /// rows `rbusTestProvider` registers at start-up: two rows, then one and
-    /// three `SubTable` rows.
-    pub async fn start(bus: &Rbus) -> rbus::Result<Provided<Conformance>> {
-        let provided = bus.provide(Conformance::new()).await?;
+    /// Registers the provider, adds the `PartialPath1` and `PartialPath2`
+    /// rows `rbusTestProvider` registers at start-up (two rows, then one and
+    /// three `SubTable` rows), and starts the main loop.
+    pub async fn start(bus: &Rbus) -> rbus::Result<Running> {
+        let provided = Arc::new(bus.provide(Conformance::new()).await?);
         for pp in ["PartialPath1", "PartialPath2"] {
             for (table, count) in [
                 (format!("{P}.{pp}."), 2),
@@ -133,7 +213,8 @@ impl Conformance {
                 }
             }
         }
-        Ok(provided)
+        let task = tokio::spawn(main_loop(provided.clone()));
+        Ok(Running { provided, task })
     }
 
     fn next(&self, table: &str) -> u32 {
@@ -154,15 +235,98 @@ impl Default for Conformance {
     }
 }
 
+/// What `rbusTestProvider`'s `main` does once a second while it runs.
+async fn main_loop(provided: Arc<Provided<Conformance>>) {
+    let subscribed = |event: &str| !provided.subscribers(Some(event)).is_empty();
+    let mut event_counts = [0i32; 2];
+    let mut table_reg_done = [false; 2];
+    let mut late: Option<Provided<LateEvent>> = None;
+    let (mut no_auto_pub, mut dir) = (3i32, 1i32);
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        for (j, count) in event_counts.iter_mut().enumerate() {
+            let event = name(&format!("Event{}!", j + 1));
+            if subscribed(&event) {
+                let data = Object::new()
+                    .with("buffer", format!("event {j} data {count}"))
+                    .with("index", Value::I32(*count));
+                let _ = provided.publish(&event, &data);
+                *count += 1;
+            }
+        }
+        let not_found = &provided.provider_not_found;
+        if not_found.load(Ordering::Relaxed) != 0 {
+            if not_found.fetch_add(1, Ordering::Relaxed) == 20 && late.is_none() {
+                late = provided.bus().provide(LateEvent).await.ok();
+            }
+            let event = name("ProviderNotFoundEvent1!");
+            if let Some(late) = &late {
+                if !late.subscribers(Some(&event)).is_empty() {
+                    let data = Object::new().with("buffer", "provider now up!");
+                    let _ = late.publish(&event, &data);
+                }
+            }
+        }
+        for (k, table) in [name("TableReg."), name("TableReg.1.TableReg.")]
+            .iter()
+            .enumerate()
+        {
+            if subscribed(table) && !table_reg_done[k] {
+                table_reg_done[k] = true;
+                for inst in [1, 2] {
+                    let _ = provided.add_row(table.as_str(), inst);
+                }
+            }
+        }
+        for i in 0..10 {
+            let event = name(&format!("EventsTable.{i}.Event"));
+            if subscribed(&event) {
+                let data = Object::new().with("data", format!("tableEvent data instNum={i}"));
+                let _ = provided.publish(&event, &data);
+            }
+        }
+        // `NoAutoPubInt` has no getter: the loop publishes its changes,
+        // cycling between 3 and 7.
+        let property = name("NoAutoPubInt");
+        if subscribed(&property) {
+            let old = no_auto_pub;
+            no_auto_pub += dir;
+            if no_auto_pub == 3 {
+                dir = 1;
+            } else if no_auto_pub == 7 {
+                dir = -1;
+            }
+            let _ = provided.publish_value_change(&property, old, no_auto_pub);
+        }
+    }
+}
+
 impl Provider for Conformance {
-    /// The elements of `rbusTestProvider.c`'s `main`, in its order, without
-    /// the event and value-change elements (M5).
+    /// The elements of `rbusTestProvider.c`'s `main`, in its order. C polls
+    /// every subscribed property every 2 s; here the properties whose values
+    /// change without a set are declared with `poll`.
     fn schema(&self) -> Schema {
         let mut s = Schema::new();
         for (leaf, _) in test_values() {
             s = s.property(name(&format!("Value.{leaf}")), Access::ReadWrite);
         }
         s = s
+            .event(name("Event1!"))
+            .event(name("Event2!"))
+            .event(name("ErrorSubHandlerEvent!"))
+            .property(name("VCParam"), Access::ReadOnly)
+            .poll(VC_PERIOD);
+        for kind in ["Int", "Str"] {
+            for i in 0..6 {
+                s = s
+                    .property(name(&format!("VCParam{kind}{i}")), Access::ReadOnly)
+                    .poll(VC_PERIOD);
+            }
+        }
+        s = s
+            .property(name("VCParamBy"), Access::ReadWrite)
+            .poll(VC_PERIOD)
+            .property(name("NoAutoPubInt"), Access::ReadOnly)
             .table(name("Table1.{i}."), Rows::Dynamic)
             .table(name("Table1.{i}.Table2.{i}."), Rows::Dynamic)
             .table(name("Table1.{i}.Table2.{i}.Table3.{i}."), Rows::Dynamic)
@@ -172,6 +336,9 @@ impl Provider for Conformance {
                 name("Table1.{i}.Table2.{i}.Table3.{i}.data"),
                 Access::ReadWrite,
             )
+            .table(name("TableReg.{i}."), Rows::Dynamic)
+            .table(name("TableReg.{i}.TableReg.{i}."), Rows::Dynamic)
+            .property(name("ResetTables"), Access::WriteOnly)
             .method(name("Method11()"))
             .method(name("Method3()"))
             .method(name("Table1.{i}.Method1()"))
@@ -206,8 +373,13 @@ impl Provider for Conformance {
                     Access::ReadOnly,
                 );
         }
-        s.property(name("BigString"), Access::ReadWrite)
+        s.property(name("TestProviderNotFound"), Access::WriteOnly)
+            .property(name("BigString"), Access::ReadWrite)
             .property(name("BigBytes"), Access::ReadWrite)
+            .table(name("EventsTable.{i}."), Rows::Dynamic)
+            .property(name("EventsTable.{i}.Prop"), Access::ReadOnly)
+            .poll(VC_PERIOD)
+            .event(name("EventsTable.{i}.Event"))
             .property(name("TestRunning"), Access::ReadWrite)
     }
 
@@ -217,11 +389,39 @@ impl Provider for Conformance {
         if Self::is_partial_path_param(name) {
             return Ok(Value::from(name.as_str()));
         }
+        let leaf = leaf(name);
+        let mut c = self.counters.lock().unwrap();
+        match leaf {
+            // `getVCHandler`: "value N", with N going up every second read.
+            "VCParam" => {
+                c.vc += 1;
+                return Ok(Value::String(format!("value {}", (c.vc - 1) / 2)));
+            }
+            "VCParamBy" => return Ok(Value::I32(self.by_value.load(Ordering::Relaxed))),
+            // No getter in the C provider.
+            "NoAutoPubInt" => return Err(Fault::not_allowed()),
+            "Prop" => {
+                let i = index_after(name, "EventsTable.");
+                c.events_table[i] += 1;
+                return Ok(Value::I32(c.events_table[i]));
+            }
+            _ if leaf.starts_with("VCParamInt") => {
+                let i = index_after(leaf, "VCParamInt");
+                return Ok(Value::I32(vc_step(&mut c.int[i])));
+            }
+            _ if leaf.starts_with("VCParamStr") => {
+                const STRS: [&str; 6] = ["aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff"];
+                let i = index_after(leaf, "VCParamStr");
+                return Ok(Value::from(STRS[vc_step(&mut c.str[i]) as usize]));
+            }
+            _ => {}
+        }
+        drop(c);
         if let Some(v) = self.values.lock().unwrap().get(name.as_str()) {
             return Ok(v.clone());
         }
         // A table row's `data` starts out empty (`createPropertyNode`).
-        if leaf(name) == "data" {
+        if leaf == "data" {
             return Ok(Value::from(""));
         }
         Err(Fault::not_found())
@@ -239,7 +439,20 @@ impl Provider for Conformance {
         }
         let mut values = self.values.lock().unwrap();
         for change in tx {
-            values.insert(change.name().to_string(), change.into_value());
+            match leaf(change.name()) {
+                "VCParamBy" => {
+                    let v: i32 = change.get().unwrap_or_default();
+                    self.by_value.store(v, Ordering::Relaxed);
+                }
+                // The main loop registers the late event 20 s from now.
+                "TestProviderNotFound" => self.provider_not_found.store(1, Ordering::Relaxed),
+                // The C provider resets its own row data; the engine's rows
+                // stay, as the library's do.
+                "ResetTables" => {}
+                _ => {
+                    values.insert(change.name().to_string(), change.into_value());
+                }
+            }
         }
         Ok(())
     }
@@ -303,6 +516,10 @@ impl Provider for Conformance {
         table: &TablePath,
         _alias: Option<&str>,
     ) -> Result<u32, Fault> {
+        // `tableRegAddRowHandler` refuses; only the provider adds those rows.
+        if table.contains(".TableReg.") {
+            return Err(Fault::new(Status::InvalidInput));
+        }
         Ok(self.next(table))
     }
 
@@ -312,6 +529,15 @@ impl Provider for Conformance {
             .lock()
             .unwrap()
             .retain(|k, _| !k.starts_with(&prefix));
+        Ok(())
+    }
+
+    /// `provideErrorSubHandler` refuses every subscription;
+    /// `tableRegSubHandler` and the others accept.
+    async fn on_subscribe(&self, _cx: &Context, sub: &SubscriberInfo) -> Result<(), Fault> {
+        if sub.event == name("ErrorSubHandlerEvent!") {
+            return Err(Fault::access_denied());
+        }
         Ok(())
     }
 }

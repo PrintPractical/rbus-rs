@@ -9,9 +9,9 @@ mod conformance;
 use std::process::Command;
 use std::time::Duration;
 
-use common::connect;
 use conformance::Conformance;
-use rbus_testkit::broker::{RawClient, test_inbox};
+use rbus::Rbus;
+use rbus_testkit::broker::{RawClient, broker_socket, test_inbox};
 
 /// The groups share one data model and the C consumer's names, so they run
 /// one at a time, each against a fresh provider.
@@ -48,7 +48,13 @@ async fn run_group(group: &'static str, c_provider_passes: u32) {
         Duration::from_secs(15),
     )
     .unwrap();
-    let bus = connect(&format!("conformance-{group}")).await;
+    // The same component name as the C provider: value-change events name
+    // it as `by`, and `--ValueChange` checks that.
+    let bus = Rbus::builder("TestProvider")
+        .socket(broker_socket())
+        .connect()
+        .await
+        .unwrap();
     let provider = Conformance::start(&bus).await.unwrap();
     let out = tokio::task::spawn_blocking(move || {
         Command::new("rbusTestConsumer")
@@ -60,6 +66,10 @@ async fn run_group(group: &'static str, c_provider_passes: u32) {
     .unwrap();
     drop(provider);
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // The whole output, for when a group fails.
+    let log = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("rbusTestConsumer-{group}.log"));
+    let _ = std::fs::write(&log, stdout.as_bytes());
     let tail: String = {
         let lines: Vec<&str> = stdout.lines().collect();
         lines[lines.len().saturating_sub(60)..].join("\n")
@@ -102,4 +112,28 @@ async fn pt2_pt10_rbus_test_consumer_tables_group() {
 #[ignore = "needs rtrouted: run scripts/interop.sh"]
 async fn pt8_rbus_test_consumer_partial_path_group() {
     run_group("PartialPath", 252).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn p12_rbus_test_consumer_filter_group() {
+    run_group("Filter", 54).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn p9_p10_p12_rbus_test_consumer_value_change_group() {
+    run_group("ValueChange", 66).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn pt9_p9_rbus_test_consumer_events_group() {
+    run_group("Events", 69).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn p4_p8_rbus_test_consumer_subscribe_group() {
+    run_group("Subscribe", 53).await;
 }
