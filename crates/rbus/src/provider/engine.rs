@@ -82,7 +82,7 @@ impl Outbox for Core {
 const UNSUPPORTED_METHOD: i32 = 9;
 
 /// [`Provider`] made object safe, so providers of different types can share
-/// the registry (decisions.md D3).
+/// the registry.
 pub(crate) trait DynProvider: Send + Sync {
     fn get<'a>(
         &'a self,

@@ -1,7 +1,7 @@
 //! The state a `#[derive(Model)]` provider is made of: properties
 //! ([`Prop`]), tables ([`Table`]) and events ([`Event`]). Each one serves
 //! consumers from its stored state and publishes its own changes once the
-//! model is registered (design.md 4.8).
+//! model is registered.
 
 use std::borrow::Borrow;
 use std::fmt;

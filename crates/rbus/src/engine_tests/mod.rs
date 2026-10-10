@@ -3,7 +3,7 @@
 //! These cover what a real rtrouted can't be made to do on demand: replies that
 //! never come, a broker that vanishes mid-request, garbage on the socket, and
 //! exact checks of what we send. Feature behaviour is tested against the real
-//! broker in `tests/` (decisions.md D13, D25).
+//! broker in `tests/`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};

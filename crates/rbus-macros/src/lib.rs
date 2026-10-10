@@ -41,7 +41,7 @@ pub fn name(input: TokenStream) -> TokenStream {
     }
 }
 
-/// Serves a struct's state as a data model (design.md 4.8).
+/// Serves a struct's state as a data model.
 ///
 /// Fields are `Prop<T>` (a property), `Table<Row>` (a table), `Event<T>`
 /// (an event) or another `Model` (a sub-object); mark anything else
@@ -62,7 +62,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// A table row for `Table<Row>` (design.md 4.8).
+/// A table row for `Table<Row>`.
 ///
 /// Fields are plain values (any `RbusType + Clone + PartialEq`), `Table`s
 /// (nested tables), `Event`s, or `#[rbus(object)]` sub-objects whose type
@@ -79,8 +79,8 @@ pub fn derive_row(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Serves an impl block's functions as properties and methods (design.md
-/// 4.9): `#[rbus::provider(path = "Device.WiFi.Radio.{i}.")]`.
+/// Serves an impl block's functions as properties and methods:
+/// `#[rbus::provider(path = "Device.WiFi.Radio.{i}.")]`.
 ///
 /// Function options: `get[ = "Name"]` and `poll = "2s"`, `set[ = "Name"]`,
 /// `method[ = "Name()"]`. Names default to the function name in PascalCase

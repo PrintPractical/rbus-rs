@@ -1,5 +1,5 @@
 //! The subscription registry (M5): subscribe and unsubscribe requests, and
-//! publishing to subscribers (decisions.md D9, D35).
+//! publishing to subscribers.
 //!
 //! Like `rbus.c`, the engine keeps every subscriber and sends each one its
 //! own copy of an event, addressed to its inbox and named as it subscribed:
