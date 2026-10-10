@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "rbus"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "futures-core",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "rbus-macros"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -356,11 +356,11 @@ dependencies = [
 
 [[package]]
 name = "rbus-testkit"
-version = "0.0.0"
+version = "0.0.1"
 
 [[package]]
 name = "rbus-wire"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "proptest",

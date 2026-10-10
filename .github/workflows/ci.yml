@@ -66,16 +66,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # The published crates package and build from their tarballs. The
-  # workspace keeps publish = false until a release; this checkout flips it.
+  # The published crates package and build from their tarballs.
   package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sed -i 's/^publish = false$/publish = true/' Cargo.toml
-      - run: cargo package --workspace --exclude rbus-testkit --allow-dirty
+      - run: cargo package --workspace --exclude rbus-testkit
 
   msrv:
     runs-on: ubuntu-latest
