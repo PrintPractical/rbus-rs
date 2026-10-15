@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.2 (2026-10-15)
 
 - **Interval subscriptions:** `interval(Duration)` and `interval_raw(u32)` on property and event subscriptions. On a property, items become `Sample<T>`, whose `kind` says whether the provider sent it on the interval, as the initial value or for a change. The interval goes with every resubscribe and unsubscribe, which C providers need to find the subscription.
 - `Error::InvalidArgument` for an interval that can't be sent.
