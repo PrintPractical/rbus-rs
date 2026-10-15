@@ -63,6 +63,11 @@ pub enum Error {
     #[error("disconnected from broker")]
     Disconnected,
 
+    /// An argument that can't be sent to the bus, such as an interval that
+    /// isn't a whole number of seconds.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     /// The peer replied with something this crate can't interpret.
     #[error("unexpected reply: {0}")]
     Protocol(String),
@@ -228,6 +233,11 @@ mod tests {
                 Some(Status::Timeout),
             ),
             (Error::Disconnected, "disconnected from broker", None),
+            (
+                Error::InvalidArgument("x".into()),
+                "invalid argument: x",
+                None,
+            ),
             (Error::Protocol("x".into()), "unexpected reply: x", None),
         ];
         for (e, text, status) in cases {

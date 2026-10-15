@@ -226,7 +226,7 @@ Every feature has integration tests against the real broker.
 | Get and set | One value or many; partial paths and wildcards as a `Tree`, with per-component failures reported; set and batch set as transactions that name the failing parameter |
 | Tables and methods | Add, remove and list rows, with aliases; methods with serde arguments and results, and typed errors |
 | Discovery | Element owners, component elements, all components, connect and disconnect advisories |
-| Events | Typed streams for value changes, table rows and general events; initial value; retry until the provider appears; a bounded buffer that reports lag, or applies backpressure |
+| Events | Typed streams for value changes, table rows and general events; initial value; interval subscriptions; retry until the provider appears; a bounded buffer that reports lag, or applies backpressure |
 | Providers | Properties, events and methods with async handlers; caller identity; subscription hooks; value-change events, including from state; provider-side filters; initial values; direct-mode requests rejected |
 | Provider tables | Row templates, consumer and app rows, aliases, nested tables; partial-path gets over the model; row events; row names for `rbuscli` |
 | Cross-cutting | `tracing` spans per operation; a typed `Error` and `Status`; legacy CCSP codes; both header sizes; tokio; configurable limits on what peers send (`RbusBuilder::limits`) |
@@ -240,7 +240,7 @@ Every feature has integration tests against the real broker.
   - raw-data events;
   - the `rbusMessage_*` API;
   - the session manager API and session ids;
-  - interval and duration subscriptions;
+  - duration subscriptions;
   - the element-info browsing API;
   - the C timeout environment variables and override files.
 - **Per-call timeouts:** use `tokio::time::timeout`. Dropping a request future cancels it and leaves nothing behind. A `set_many` that spans several providers goes to them one at a time, so cancelling it part-way can leave the earlier ones' sets applied.
@@ -249,6 +249,7 @@ Every feature has integration tests against the real broker.
   - consumer-side event filters;
   - multiplexed event streams;
   - auto-publish by polling getters;
+  - providers that publish on an interval (Rust providers refuse interval subscriptions for now);
   - persisting a provider's subscribers across restarts;
   - dynamic table sync and hidden rows;
   - OpenTelemetry trace propagation.

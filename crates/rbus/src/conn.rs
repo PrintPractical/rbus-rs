@@ -89,6 +89,9 @@ pub(crate) struct SubEntry {
     /// The name subscribed to: the provider's routing key, maybe a wildcard.
     pub(crate) event_name: String,
     pub(crate) queue: Arc<Queue<Event>>,
+    /// The interval sent with the subscription; 0 for none. Providers key
+    /// subscriptions on it, so unsubscribing must send it again.
+    pub(crate) interval: u32,
     /// False while the subscribe request is in flight; only ready
     /// subscriptions are re-sent after an advisory.
     pub(crate) ready: bool,
@@ -343,12 +346,12 @@ impl Core {
         }
     }
 
-    /// `(id, event name)` of every subscription that has been set up.
-    pub(crate) fn sub_names(&self) -> Vec<(i32, String)> {
+    /// `(id, event name, interval)` of every subscription that has been set up.
+    pub(crate) fn sub_names(&self) -> Vec<(i32, String, u32)> {
         lock(&self.subs)
             .iter()
             .filter(|(_, s)| s.ready)
-            .map(|(id, s)| (*id, s.event_name.clone()))
+            .map(|(id, s)| (*id, s.event_name.clone(), s.interval))
             .collect()
     }
 
@@ -536,9 +539,15 @@ impl Core {
         };
         let queue = {
             let subs = lock(&self.subs);
+            // Like C, an event for an id we don't know matches on the name and
+            // the interval, so a late sample from a dropped interval
+            // subscription doesn't reach a plain one.
             subs.get(&event.component_id)
                 .filter(|s| s.event_name == meta.event_name)
-                .or_else(|| subs.values().find(|s| s.event_name == meta.event_name))
+                .or_else(|| {
+                    subs.values()
+                        .find(|s| s.event_name == meta.event_name && s.interval == event.interval)
+                })
                 .map(|s| s.queue.clone())
         };
         match queue {

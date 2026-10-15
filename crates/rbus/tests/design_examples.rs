@@ -247,6 +247,32 @@ async fn design_4_7_subscriptions() -> rbus::Result<()> {
     assert!(tick.index >= 0);
 
     ticks.unsubscribe().await?; // or just drop it
+
+    // The value on an interval, changed or not (E7)
+    let mut uptime = bus
+        .subscribe_value::<u32>("Device.TestProvider.Value.UINT32")
+        .interval(Duration::from_secs(5)) // items become Sample<u32> { name, value, kind }
+        .await?;
+    let sample = tokio::time::timeout(Duration::from_secs(10), uptime.next())
+        .await
+        .expect("a sample")
+        .expect("open")
+        .expect("decodes");
+    assert_eq!(
+        (sample.value, sample.kind),
+        (10_000_000, rbus::SampleKind::Interval)
+    );
+
+    // A provider that reads the interval in its own unit gets the number as-is
+    let mut stats = bus
+        .subscribe::<Object>("Device.TestProvider.Event2!")
+        .interval_raw(100) // e.g. 100 ms, if that provider says so
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), stats.next())
+        .await
+        .expect("an event")
+        .expect("open")
+        .expect("decodes");
     Ok(())
 }
 
