@@ -98,8 +98,8 @@ pub enum SampleKind {
     Initial,
     /// The interval elapsed.
     Interval,
-    /// The value changed. Providers that publish changes themselves send
-    /// them to interval subscriptions too.
+    /// The value changed. C providers send each value-change event to
+    /// every subscription to the property, interval subscriptions included.
     Changed,
 }
 

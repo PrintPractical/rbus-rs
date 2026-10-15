@@ -212,10 +212,15 @@ async fn e7_interval_and_plain_subscriptions_are_independent() {
     let change = within(10, changes.next()).await.unwrap().unwrap();
     assert_eq!(change.new, 1234);
     loop {
-        // A sample from before the set may come first.
+        // A sample from before the set may come first. The plain subscription
+        // makes the C provider poll for changes, and `rbusEvent_Publish` sends
+        // each change to every subscription to the property, this one too.
         let s = within(5, samples.next()).await.unwrap().unwrap();
-        assert_eq!(s.kind, SampleKind::Interval);
-        if s.value == 1234 {
+        assert!(
+            matches!(s.kind, SampleKind::Interval | SampleKind::Changed),
+            "{s:?}"
+        );
+        if s.kind == SampleKind::Interval && s.value == 1234 {
             break;
         }
     }
