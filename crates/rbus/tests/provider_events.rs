@@ -254,3 +254,25 @@ async fn d9_intervals_are_refused_and_duplicates_reported() {
     let v = bus.get::<Value>("Device.D9.Enable").await.unwrap();
     assert_eq!(v, Value::Bool(true));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs rtrouted: run scripts/interop.sh"]
+async fn e7_an_interval_subscription_to_a_rust_provider_is_refused() {
+    // Rust providers don't publish on intervals yet.
+    let provider_bus = connect("e7-provider").await;
+    let p = Sample::start(&provider_bus, "E7").await;
+    let bus = connect("e7-consumer").await;
+    let err = bus
+        .subscribe_value::<u32>("Device.E7.Uptime")
+        .interval(std::time::Duration::from_secs(1))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), Some(Status::InvalidOperation), "{err:?}");
+    let err = bus
+        .subscribe::<Object>("Device.E7.Alarm!")
+        .interval_raw(100)
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), Some(Status::InvalidOperation), "{err:?}");
+    assert!(p.subscribers(None).is_empty());
+}

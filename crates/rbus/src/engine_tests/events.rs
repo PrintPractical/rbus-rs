@@ -17,8 +17,8 @@ use rbus_wire::value::{Object, Property, Value};
 
 use super::{Listener, Peer, get_ok, request, short};
 use crate::{
-    Advisory, ConnectionState, Error, EventError, Overflow, Rbus, Retry, RowEvent, RowId, Status,
-    Timeouts,
+    Advisory, ConnectionState, Error, EventError, Overflow, Rbus, Retry, RowEvent, RowId, Sample,
+    SampleKind, Status, Timeouts,
 };
 
 /// The advisory route is registered once, before the first subscription.
@@ -219,6 +219,198 @@ async fn e2_dropping_a_stream_unsubscribes() {
         }
         assert_eq!(unsub.await.unwrap().is_ok(), ok);
     }
+}
+
+fn interval_of(req: &Frame, method: Method) -> u32 {
+    request::<SubscribeRequest>(req, method)
+        .options
+        .unwrap()
+        .interval
+}
+
+/// Providers key subscriptions on the interval, so every request about a
+/// subscription (subscribe, resubscribe, unsubscribe) must carry it.
+#[tokio::test]
+async fn e7_the_interval_goes_with_every_request() {
+    let l = Listener::new();
+    let (bus, mut peer) = l.connect(short()).await;
+    // A bad interval fails before anything is sent.
+    let bad = bus
+        .subscribe_value::<i32>("Device.A")
+        .interval(Duration::from_millis(100))
+        .await;
+    assert!(matches!(bad, Err(Error::InvalidArgument(_))), "{bad:?}");
+
+    let sub = tokio::spawn({
+        let bus = bus.clone();
+        async move {
+            bus.subscribe_value::<i32>("Device.A")
+                .interval(Duration::from_secs(2))
+                .initial_value()
+                .await
+        }
+    });
+    expect_advisory_route(&mut peer).await;
+    let req = peer.recv().await;
+    let body: SubscribeRequest = request(&req, Method::Subscribe);
+    assert!(body.publish_on_subscribe);
+    let opts = body.options.unwrap();
+    assert_eq!(opts.interval, 2);
+    let id = opts.component_id;
+    reply_subscribe(
+        &mut peer,
+        &req,
+        SubscribeResponse {
+            status: 0,
+            initial: InitialValue::Value(Box::new(event(
+                "Device.A",
+                EventKind::InitialValue,
+                Object::new().with("initialValue", 4i32),
+                id,
+            ))),
+            subscription_id: Some(3),
+        },
+    )
+    .await;
+    let mut sub = sub.await.unwrap().unwrap();
+    assert!(format!("{sub:?}").contains("interval: 2"));
+    let mut tick = event(
+        "Device.A",
+        EventKind::Interval,
+        Object::new().with("Device.A", 5i32),
+        id,
+    );
+    tick.interval = 2;
+    peer.send(event_frame(bus.inbox(), "Device.A", tick)).await;
+    let items: Vec<Sample<i32>> = [sub.next().await, sub.next().await]
+        .map(|i| i.unwrap().unwrap())
+        .into();
+    assert_eq!(
+        items
+            .iter()
+            .map(|s| (s.name.as_str(), s.value, s.kind))
+            .collect::<Vec<_>>(),
+        [
+            ("Device.A", 4, SampleKind::Initial),
+            ("Device.A", 5, SampleKind::Interval)
+        ]
+    );
+
+    // A restarted provider gets the same interval again.
+    peer.send(advisory_frame(0, "rbus.provider.INBOX.2")).await;
+    let req = peer.recv().await;
+    assert_eq!(interval_of(&req, Method::Subscribe), 2);
+    reply_subscribe(&mut peer, &req, subscribed(4)).await;
+
+    // Unsubscribing, explicitly or by dropping, sends it too.
+    let unsub = tokio::spawn(sub.unsubscribe());
+    let req = peer.recv().await;
+    assert_eq!(interval_of(&req, Method::Unsubscribe), 2);
+    peer.reply_rbus(&req, &StatusResponse { status: 0 }).await;
+    unsub.await.unwrap().unwrap();
+
+    let sub = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.subscribe::<Object>("Device.E!").interval_raw(100).await }
+    });
+    let req = peer.recv().await;
+    assert_eq!(interval_of(&req, Method::Subscribe), 100);
+    reply_subscribe(&mut peer, &req, subscribed(5)).await;
+    drop(sub.await.unwrap().unwrap());
+    assert_eq!(interval_of(&peer.recv().await, Method::Unsubscribe), 100);
+
+    // So does giving up on a subscription half set up.
+    let sub = tokio::spawn({
+        let bus = bus.clone();
+        async move {
+            bus.subscribe_value::<i32>("Device.A")
+                .interval_raw(250)
+                .interval(Duration::from_secs(7))
+                .await
+        }
+    });
+    let req = peer.recv().await;
+    assert_eq!(interval_of(&req, Method::Subscribe), 7);
+    sub.abort();
+    assert!(sub.await.unwrap_err().is_cancelled());
+    assert_eq!(interval_of(&peer.recv().await, Method::Unsubscribe), 7);
+
+    // And closing the bus.
+    let sub = tokio::spawn({
+        let bus = bus.clone();
+        async move {
+            bus.subscribe::<Object>("Device.E!")
+                .interval(Duration::from_secs(1))
+                .interval_raw(30_000)
+                .await
+        }
+    });
+    let req = peer.recv().await;
+    reply_subscribe(&mut peer, &req, subscribed(6)).await;
+    let _sub = sub.await.unwrap().unwrap();
+    let closing = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.close().await }
+    });
+    assert_eq!(interval_of(&peer.recv().await, Method::Unsubscribe), 30_000);
+    drop(peer);
+    closing.await.unwrap().unwrap();
+}
+
+/// An event for an unknown id falls back to a subscription with the same
+/// name and interval, as in C: a sample still in flight from a dropped
+/// interval subscription must not reach a plain one.
+#[tokio::test]
+async fn e7_late_samples_do_not_reach_a_plain_subscription() {
+    let l = Listener::new();
+    let (bus, mut peer) = l.connect(short()).await;
+    let plain = tokio::spawn({
+        let bus = bus.clone();
+        async move { bus.subscribe_value::<i32>("Device.A").await }
+    });
+    expect_advisory_route(&mut peer).await;
+    let req = peer.recv().await;
+    reply_subscribe(&mut peer, &req, subscribed(1)).await;
+    let mut plain = plain.await.unwrap().unwrap();
+    let samples = tokio::spawn({
+        let bus = bus.clone();
+        async move {
+            bus.subscribe_value::<i32>("Device.A")
+                .interval(Duration::from_secs(1))
+                .await
+        }
+    });
+    let req = peer.recv().await;
+    let dropped = request::<SubscribeRequest>(&req, Method::Subscribe)
+        .options
+        .unwrap()
+        .component_id;
+    reply_subscribe(&mut peer, &req, subscribed(2)).await;
+    drop(samples.await.unwrap().unwrap());
+    request::<SubscribeRequest>(&peer.recv().await, Method::Unsubscribe);
+
+    let mut late = event(
+        "Device.A",
+        EventKind::Interval,
+        Object::new().with("Device.A", 1i32),
+        dropped,
+    );
+    late.interval = 1;
+    peer.send(event_frame(bus.inbox(), "Device.A", late)).await;
+    // An unknown id with no interval still finds the plain subscription.
+    peer.send(event_frame(
+        bus.inbox(),
+        "Device.A",
+        event(
+            "Device.A",
+            EventKind::ValueChanged,
+            Object::new().with("value", 7i32).with("oldValue", 6i32),
+            999,
+        ),
+    ))
+    .await;
+    let change = plain.next().await.unwrap().unwrap();
+    assert_eq!((change.old, change.new), (Some(6), 7));
 }
 
 #[tokio::test]

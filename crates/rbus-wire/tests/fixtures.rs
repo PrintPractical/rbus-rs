@@ -355,3 +355,49 @@ fn recorded_values_decode_to_expected_rust_values() {
         other => panic!("BytesData decoded as {other:?}"),
     }
 }
+
+#[test]
+fn recorded_interval_events_carry_the_property_by_name() {
+    // `rbuscli subinterval Device.Provider1.Param1 1`: the C provider's own
+    // interval publisher sends INTERVAL events, not value changes.
+    let (_, lines) = fixtures()
+        .into_iter()
+        .find(|(n, _)| n == "events_interval")
+        .unwrap();
+    let mut subscribes = Vec::new();
+    let mut events = Vec::new();
+    for l in &lines {
+        let mut dec = FrameDecoder::new();
+        dec.push(&unhex(l["frame"].as_str().unwrap()));
+        let f = dec.next_frame().unwrap().unwrap();
+        // The recorder sees each frame twice: sent to the broker, then
+        // passed on by it. Requests are counted as sent.
+        if f.header.topic == "Device.Provider1.Param1" && l["dir"] == "to_broker" {
+            let (mut r, meta) = split_method_payload(&f.payload, &Limits::DEFAULT).unwrap();
+            if matches!(meta.method, Method::Subscribe | Method::Unsubscribe) {
+                let req = SubscribeRequest::decode(&mut r).unwrap();
+                subscribes.push((meta.method, req.options.unwrap().interval));
+            }
+        } else if let Ok((mut r, meta)) = split_event_payload(&f.payload, &Limits::DEFAULT) {
+            if meta.event_name == "Device.Provider1.Param1" {
+                events.push(Event::decode(&mut r).unwrap());
+            }
+        }
+    }
+    assert_eq!(
+        subscribes,
+        [(Method::Subscribe, 1), (Method::Unsubscribe, 1)]
+    );
+    assert!(events.len() >= 2, "{events:?}");
+    for ev in &events {
+        assert_eq!(ev.kind, rbus_wire::event::EventKind::Interval, "{ev:?}");
+        assert_eq!(ev.interval, 1);
+        let data = ev.data.as_ref().unwrap();
+        assert_eq!(data.properties.len(), 1, "{data:?}");
+        assert_eq!(data.properties[0].name, "Device.Provider1.Param1");
+        assert!(
+            matches!(data.properties[0].value, Value::I32(_)),
+            "{data:?}"
+        );
+    }
+}

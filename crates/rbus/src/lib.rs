@@ -71,7 +71,9 @@ pub use queue::Overflow;
 pub use rbus_wire::Limits;
 pub use rbus_wire::value::{DateTime, Object, ObjectKind, Property, Value};
 pub use retry::Retry;
-pub use subscribe::{EventError, RowEvent, SubscribeBuilder, Subscription, ValueChange};
+pub use subscribe::{
+    EventError, RowEvent, Sample, SampleKind, SubscribeBuilder, Subscription, ValueChange,
+};
 pub use table::{AddRow, RemoteTable, RowId, RowRef};
 pub use tree::{Tree, TreeFailure};
 pub use types::{IntoValue, RbusType};

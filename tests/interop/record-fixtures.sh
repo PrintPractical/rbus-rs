@@ -126,6 +126,11 @@ subscribe_filter_initial() {   # value-change subscription with a filter and ini
     interactive "subscribe Device.Provider1.Param1 > 2 true" 7 "unsubscribe Device.Provider1.Param1 > 2" 1
 }
 
+events_interval() {   # interval subscription: C auto-publish sends INTERVAL events
+    bg rbusValueChangeProvider 20; sleep 2
+    interactive "subinterval Device.Provider1.Param1 1" 4 "unsubinterval Device.Provider1.Param1 1" 1
+}
+
 get_names() {
     bg rbusSampleProvider 15; sleep 2
     rbuscli getnames Device.SampleProvider.
@@ -138,7 +143,7 @@ get_single_rt() {
 
 for s in get_single get_multi get_all_types set_values undeliverable tables \
          methods events_general events_value_change discovery datetime_value \
-         subscribe_filter_initial get_names get_single_rt; do
+         subscribe_filter_initial events_interval get_names get_single_rt; do
     scenario "$s" "$s"
 done
 echo "fixtures written to $out"
